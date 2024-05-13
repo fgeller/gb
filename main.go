@@ -11,6 +11,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type model struct {
@@ -77,7 +78,7 @@ func (m *model) setContent(out gitBlameOutput) {
 			continue
 		}
 
-		trimmed := strings.TrimPrefix(rawLine, "previous ")
+		trimmed := rawLine
 		isStart := strings.Index(trimmed, " ") == 40
 		if isStart {
 			currentSHA = trimmed[:40]
@@ -107,19 +108,20 @@ func (m *model) setContent(out gitBlameOutput) {
 
 	}
 
-	m.logger.With(
-		"line_count", len(res.lines),
-	).Info("parsed git blame output")
+	m.logger.With("line_count", len(res.lines)).Info("parsed git blame output")
 	m.content = res
 
+	m.updateContent()
+}
+
+func (m *model) updateContent() {
 	authorMaxWidth := 0
-	for _, ci := range commits {
+	for _, ci := range m.content.metadata {
 		authorMaxWidth = max(authorMaxWidth, len(ci.author))
 	}
-
 	authorWidth := min(10, authorMaxWidth)
-	fileWidth := int(0.6 * float64(m.viewport.Width))
-	infoWidth := m.viewport.Width - fileWidth - 3
+	infoWidth := min(10+10+8, int(0.4*float64(m.viewport.Width)))
+	fileWidth := m.viewport.Width - 3 - infoWidth
 
 	m.logger.With(
 		"author_width", authorWidth,
@@ -127,44 +129,33 @@ func (m *model) setContent(out gitBlameOutput) {
 		"info_width", infoWidth,
 	).Info("widths")
 
-	combined := ""
-	for i, line := range res.lines {
+	bold := lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("#f1f1f1"))
+	rendered := ""
+	for i, line := range m.content.lines {
 		if i > 0 {
-			combined += "\n"
+			rendered += "\n"
 		}
 
-		filePartLen := 0
-		filePart := ""
-		for _, r := range line {
-			rLen := 1
-			if r == '\t' {
-				rLen = 4
-			}
-			if rLen+filePartLen > fileWidth {
-				break
-			}
-			filePart += string(r)
-			filePartLen += rLen
-		}
-		if filePartLen < fileWidth {
-			filePart += strings.Repeat(" ", fileWidth-filePartLen)
-		}
-
-		md := res.metadata[i]
+		md := m.content.metadata[i]
 		infoLine := fmt.Sprintf(
-			"%s %s",
+			"%s %s %s",
 			formatStr(md.author, authorWidth),
 			md.authorTime.Format(time.DateOnly),
+			md.sha[:7],
 		)
-		infoPart := infoLine[:min(infoWidth, len(infoLine))]
-		if len(infoPart) < infoWidth {
-			infoPart += strings.Repeat(" ", infoWidth-len(infoPart))
-		}
+		infoPart := formatStr(infoLine, infoWidth)
+		filePart := formatStr(line, fileWidth)
 
-		combined += filePart + " | " + infoPart
+		combined := filePart + " | " + infoPart
+		if i == m.lineNumber {
+			m.logger.Info("ever true?")
+			rendered += bold.Render(combined)
+		} else {
+			rendered += combined
+		}
 	}
 
-	m.viewport.SetContent(combined)
+	m.viewport.SetContent(rendered)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -188,10 +179,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "down":
-			m.lineNumber = min(len(m.content.lines), m.lineNumber+1)
+			m.lineNumber = min(len(m.content.lines)-1, m.lineNumber+1)
+			m.logger.With("line_number", m.lineNumber).Info("line number update down")
+			m.updateContent()
 
 		case "up":
 			m.lineNumber = max(0, m.lineNumber-1)
+			m.logger.With("line_number", m.lineNumber).Info("line number update up")
+			m.updateContent()
 
 		default:
 		}
