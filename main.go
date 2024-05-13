@@ -1,11 +1,11 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,72 +15,167 @@ import (
 
 type model struct {
 	filePath string
+	logger   *slog.Logger
 
 	ready    bool
 	viewport viewport.Model
-	content  blameContent
+	content  content
 
 	lineNumber, columnNumber int
 }
 
-type lineInfo struct {
-	author    string
-	timestamp time.Time
-	commit    string
+type commitInfo struct {
+	author     string
+	authorTime time.Time
+	sha        string
 }
-type blameContent struct {
+type content struct {
 	ready    bool
 	lines    []string
-	metadata map[int]*lineInfo // zero-indexed
+	metadata map[int]*commitInfo // zero-indexed
 }
 
-func (c blameContent) render() string {
-	return strings.Join(c.lines, "\n")
+func formatStr(str string, goalLen int) string {
+	strLen := 0
+	res := ""
+	for _, r := range str {
+		rLen := 1
+		if r == '\t' {
+			rLen = 4
+		}
+		if strLen+rLen > goalLen {
+			break
+		}
+		res += string(r)
+		strLen += rLen
+	}
+
+	if strLen < goalLen {
+		res += strings.Repeat(" ", goalLen-strLen)
+	}
+	return res
+
 }
 
-func newBlameContent(out string) blameContent {
-	res := blameContent{
-		metadata: map[int]*lineInfo{},
+// parses the git blame output
+func (m *model) setContent(out gitBlameOutput) {
+	res := content{
+		metadata: map[int]*commitInfo{},
 		lines:    []string{},
 		ready:    true,
 	}
-	for _, rawLine := range strings.Split(out, "\n") {
-		var isMetaLine = !strings.HasPrefix(rawLine, "\t")
-		if !isMetaLine {
-			res.lines = append(res.lines, rawLine)
+
+	commits := map[string]*commitInfo{}
+	currentSHA := ""
+
+	for _, rawLine := range strings.Split(string(out), "\n") {
+		var isFileLine = strings.HasPrefix(rawLine, "\t")
+		if isFileLine {
+			trimmed := strings.TrimPrefix(rawLine, "\t")
+			res.lines = append(res.lines, trimmed)
+			res.metadata[len(res.lines)-1] = commits[currentSHA]
+			continue
 		}
 
-		meta, hasMeta := res.metadata[len(res.lines)]
+		trimmed := strings.TrimPrefix(rawLine, "previous ")
+		isStart := strings.Index(trimmed, " ") == 40
+		if isStart {
+			currentSHA = trimmed[:40]
+		}
 
+		meta, hasMeta := commits[currentSHA]
 		if !hasMeta {
-			if isMetaLine {
-				meta = &lineInfo{}
-			} else {
-				// copy meta from prev line
-				prevMeta := *res.metadata[len(res.lines)-1]
-				meta = &prevMeta
-			}
-			res.metadata[len(res.lines)] = meta
+			meta = &commitInfo{sha: currentSHA}
+			commits[currentSHA] = meta
 		}
 
-		if strings.HasPrefix(rawLine, "author") {
+		if strings.HasPrefix(rawLine, "author ") {
 			meta.author = rawLine[len("author "):]
+			if meta.author == "Not Committed Yet" {
+				meta.author = "uncommitted"
+			}
 		}
+		if strings.HasPrefix(rawLine, "author-time ") {
+			trimmed := strings.TrimPrefix(rawLine, "author-time ")
+			num, err := strconv.ParseInt(trimmed, 10, 64)
+			if err != nil {
+				fmt.Printf("failed to parse author time err=%v\n", err)
+				os.Exit(1)
+			}
+			meta.authorTime = time.Unix(num, 0)
+		}
+
 	}
 
-	return res
+	m.logger.With(
+		"line_count", len(res.lines),
+	).Info("parsed git blame output")
+	m.content = res
+
+	authorMaxWidth := 0
+	for _, ci := range commits {
+		authorMaxWidth = max(authorMaxWidth, len(ci.author))
+	}
+
+	authorWidth := min(10, authorMaxWidth)
+	fileWidth := int(0.6 * float64(m.viewport.Width))
+	infoWidth := m.viewport.Width - fileWidth - 3
+
+	m.logger.With(
+		"author_width", authorWidth,
+		"file_width", fileWidth,
+		"info_width", infoWidth,
+	).Info("widths")
+
+	combined := ""
+	for i, line := range res.lines {
+		if i > 0 {
+			combined += "\n"
+		}
+
+		filePartLen := 0
+		filePart := ""
+		for _, r := range line {
+			rLen := 1
+			if r == '\t' {
+				rLen = 4
+			}
+			if rLen+filePartLen > fileWidth {
+				break
+			}
+			filePart += string(r)
+			filePartLen += rLen
+		}
+		if filePartLen < fileWidth {
+			filePart += strings.Repeat(" ", fileWidth-filePartLen)
+		}
+
+		md := res.metadata[i]
+		infoLine := fmt.Sprintf(
+			"%s %s",
+			formatStr(md.author, authorWidth),
+			md.authorTime.Format(time.DateOnly),
+		)
+		infoPart := infoLine[:min(infoWidth, len(infoLine))]
+		if len(infoPart) < infoWidth {
+			infoPart += strings.Repeat(" ", infoWidth-len(infoPart))
+		}
+
+		combined += filePart + " | " + infoPart
+	}
+
+	m.viewport.SetContent(combined)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case blameContent:
-		m.content = msg
+	case gitBlameOutput:
+		m.setContent(msg)
 
 	case tea.WindowSizeMsg:
 		if !m.ready {
 			m.viewport = viewport.New(msg.Width, msg.Height)
 			m.viewport.YPosition = 0
-			m.viewport.SetContent(m.content.render())
 			m.ready = true
 		}
 		m.viewport.Width = msg.Width
@@ -88,6 +183,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.String() {
+
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
 
@@ -110,20 +206,46 @@ func (m model) View() string {
 	if !m.ready || !m.content.ready {
 		return "\n Initializing..."
 	}
+
 	return m.viewport.View()
 }
+
+func (m model) fileView() string {
+	return strings.Join(m.content.lines, "\n")
+}
+
+func (m model) infoView() string {
+	if !m.content.ready {
+		return ""
+	}
+
+	infoBar := ""
+	for i := range m.content.lines {
+		md := m.content.metadata[i]
+		if i > 0 {
+			infoBar += "\n"
+		}
+		line := fmt.Sprintf(" | %s", md.author)
+		infoBar += line
+	}
+
+	return infoBar
+}
+
+type gitBlameOutput string
 
 func (m model) Init() tea.Cmd {
 	return func() tea.Msg {
 		cmd := exec.Command("git", "blame", "--porcelain", "-M", "-C", m.filePath)
-		buf := make([]byte, 0, 10*1024*1024)
-		cmd.Stdout = bufio.NewWriter(bytes.NewBuffer(buf))
-		err := cmd.Run()
+		buf, err := cmd.Output()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to run git blame err=%v", err)
+			fmt.Printf("failed to run git blame err=%v\n", err)
+			os.Exit(1)
 		}
 
-		return newBlameContent(string(buf))
+		m.logger.Info("loaded initial blame output")
+
+		return gitBlameOutput(string(buf))
 	}
 }
 
@@ -132,7 +254,7 @@ func main() {
 		fmt.Println("file path is a required argument")
 		os.Exit(1)
 	}
-	filePath := os.Args[0]
+	filePath := os.Args[1]
 
 	fh, err := os.OpenFile(filePath, os.O_RDONLY, 0)
 	if err != nil {
@@ -146,8 +268,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	logFile, err := os.Create("tmp.log")
+	if err != nil {
+		fmt.Println("failed to create log file")
+	}
+	defer logFile.Close()
+
+	initialModel := model{
+		filePath: filePath,
+		logger:   slog.New(slog.NewTextHandler(logFile, nil)),
+	}
 	p := tea.NewProgram(
-		model{filePath: filePath},
+		initialModel,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
@@ -156,4 +288,6 @@ func main() {
 		fmt.Printf("failed to start err=%v", err)
 		os.Exit(1)
 	}
+
+	fmt.Printf("log file: %s\n", logFile.Name())
 }
