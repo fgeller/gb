@@ -2,71 +2,183 @@ package main
 
 import (
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
 )
 
-type model struct {
-	filePath string
-	logger   *slog.Logger
+func main() {
+	if len(os.Args) != 2 {
+		fmt.Println("file path is a required argument")
+		os.Exit(1)
+	}
+	filePath := os.Args[1]
 
-	ready    bool
-	viewport viewport.Model
-	content  content
+	fh, err := os.OpenFile(filePath, os.O_RDONLY, 0)
+	if err != nil {
+		fmt.Printf("can't open given file %#v\n", filePath)
+		os.Exit(1)
+	}
 
-	lineNumber, columnNumber int
+	err = fh.Close()
+	if err != nil {
+		fmt.Println("failed to close the file")
+		os.Exit(1)
+	}
+
+	new().run(filePath)
 }
 
-type commitInfo struct {
+func new() *container {
+	c := container{
+		app:     tview.NewApplication(),
+		chBlame: make(chan blameData),
+		log:     []string{},
+	}
+	return &c
+}
+
+type container struct {
+	app *tview.Application
+
+	fileView *tview.TextView
+	infoView *tview.Table
+
+	flex *tview.Flex
+
+	chBlame chan blameData
+	log     []string
+}
+
+func (c *container) run(filePath string) {
+
+	c.fileView = tview.NewTextView().
+		SetScrollable(true).
+		SetDynamicColors(true).
+		SetText("Loading...")
+
+	c.fileView.
+		SetTextColor(tcell.ColorBlack.TrueColor()).
+		SetBackgroundColor(tcell.ColorWhite.TrueColor())
+
+	c.infoView = tview.NewTable()
+
+	c.infoView.
+		SetBackgroundColor(tcell.ColorWhite.TrueColor())
+
+	c.flex = tview.NewFlex().
+		AddItem(c.fileView, 0, 6, true).
+		AddItem(c.infoView, 0, 4, true)
+
+	// c.flex.SetBackgroundColor(tcell.ColorWhite.TrueColor())
+
+	c.app.SetRoot(c.flex, true)
+
+	go func() { c.chBlame <- blame(filePath) }()
+	go func() { c.receive() }()
+
+	c.setKeys()
+	err := c.app.Run()
+	if err != nil {
+		fmt.Println(err.Error())
+		os.Exit(1)
+	}
+}
+
+func (c *container) receive() {
+	for {
+		select {
+		case out := <-c.chBlame:
+			c.fileView.SetText(strings.Join(out.lines, "\n"))
+			for i := range out.lines {
+				md := out.metadata[i]
+
+				lineNr := tview.NewTableCell(fmt.Sprintf("%v", i)).
+					SetTextColor(tcell.ColorBlack.TrueColor()).
+					SetBackgroundColor(tcell.ColorWhite.TrueColor())
+
+				author := tview.NewTableCell(md.author).
+					SetTextColor(tcell.ColorBlack.TrueColor()).
+					SetBackgroundColor(tcell.ColorWhite.TrueColor())
+
+				authorTime := tview.NewTableCell(md.authorTime.Format("2006-01-02")).
+					SetTextColor(tcell.ColorBlack.TrueColor()).
+					SetBackgroundColor(tcell.ColorWhite.TrueColor())
+
+				sha := tview.NewTableCell(md.sha[:7]).
+					SetTextColor(tcell.ColorBlack.TrueColor()).
+					SetBackgroundColor(tcell.ColorWhite.TrueColor())
+
+				c.infoView.SetCell(i, 0, lineNr)
+				c.infoView.SetCell(i, 1, author)
+				c.infoView.SetCell(i, 2, authorTime)
+				c.infoView.SetCell(i, 3, sha)
+
+			}
+
+			row, _ := c.fileView.GetScrollOffset()
+			c.infoView.SetOffset(row, 0)
+			c.app.Draw()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+func (c *container) setKeys() {
+	c.fileView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyDown, tcell.KeyUp:
+			row, _ := c.fileView.GetScrollOffset()
+			c.infoView.SetOffset(row, 0)
+		case tcell.KeyEscape, tcell.KeyCtrlC:
+			c.app.Stop()
+		case tcell.KeyRune:
+			if event.Rune() == 'q' {
+				c.app.Stop()
+				for _, line := range c.log {
+					fmt.Println(line)
+				}
+			}
+		}
+		return event
+	})
+}
+
+func blame(filePath string) blameData {
+	cmd := exec.Command("git", "blame", "--porcelain", "-M", "-C", filePath)
+	buf, err := cmd.Output()
+	if err != nil {
+		fmt.Printf("failed to run git blame err=%v\n", err)
+		os.Exit(1)
+	}
+
+	return parseBlameOutput(string(buf))
+}
+
+type commit struct {
 	author     string
 	authorTime time.Time
 	sha        string
 }
-type content struct {
-	ready    bool
+
+type blameData struct {
 	lines    []string
-	metadata map[int]*commitInfo // zero-indexed
-}
-
-func formatStr(str string, goalLen int) string {
-	strLen := 0
-	res := ""
-	for _, r := range str {
-		rLen := 1
-		if r == '\t' {
-			rLen = 4
-		}
-		if strLen+rLen > goalLen {
-			break
-		}
-		res += string(r)
-		strLen += rLen
-	}
-
-	if strLen < goalLen {
-		res += strings.Repeat(" ", goalLen-strLen)
-	}
-	return res
-
+	metadata map[int]*commit
 }
 
 // parses the git blame output
-func (m *model) setContent(out gitBlameOutput) {
-	res := content{
-		metadata: map[int]*commitInfo{},
+func parseBlameOutput(out string) blameData {
+	res := blameData{
+		metadata: map[int]*commit{},
 		lines:    []string{},
-		ready:    true,
 	}
 
-	commits := map[string]*commitInfo{}
+	commits := map[string]*commit{}
 	currentSHA := ""
 
 	for _, rawLine := range strings.Split(string(out), "\n") {
@@ -86,7 +198,7 @@ func (m *model) setContent(out gitBlameOutput) {
 
 		meta, hasMeta := commits[currentSHA]
 		if !hasMeta {
-			meta = &commitInfo{sha: currentSHA}
+			meta = &commit{sha: currentSHA}
 			commits[currentSHA] = meta
 		}
 
@@ -108,181 +220,5 @@ func (m *model) setContent(out gitBlameOutput) {
 
 	}
 
-	m.logger.With("line_count", len(res.lines)).Info("parsed git blame output")
-	m.content = res
-
-	m.updateContent()
-}
-
-func (m *model) updateContent() {
-	authorMaxWidth := 0
-	for _, ci := range m.content.metadata {
-		authorMaxWidth = max(authorMaxWidth, len(ci.author))
-	}
-	authorWidth := min(10, authorMaxWidth)
-	infoWidth := min(10+10+8, int(0.4*float64(m.viewport.Width)))
-	fileWidth := m.viewport.Width - 3 - infoWidth
-
-	m.logger.With(
-		"author_width", authorWidth,
-		"file_width", fileWidth,
-		"info_width", infoWidth,
-	).Info("widths")
-
-	bold := lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("#f1f1f1"))
-	rendered := ""
-	for i, line := range m.content.lines {
-		if i > 0 {
-			rendered += "\n"
-		}
-
-		md := m.content.metadata[i]
-		infoLine := fmt.Sprintf(
-			"%s %s %s",
-			formatStr(md.author, authorWidth),
-			md.authorTime.Format(time.DateOnly),
-			md.sha[:7],
-		)
-		infoPart := formatStr(infoLine, infoWidth)
-		filePart := formatStr(line, fileWidth)
-
-		combined := filePart + " | " + infoPart
-		if i == m.lineNumber {
-			m.logger.Info("ever true?")
-			rendered += bold.Render(combined)
-		} else {
-			rendered += combined
-		}
-	}
-
-	m.viewport.SetContent(rendered)
-}
-
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case gitBlameOutput:
-		m.setContent(msg)
-
-	case tea.WindowSizeMsg:
-		if !m.ready {
-			m.viewport = viewport.New(msg.Width, msg.Height)
-			m.viewport.YPosition = 0
-			m.ready = true
-		}
-		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height
-
-	case tea.KeyMsg:
-		switch msg.String() {
-
-		case "q", "ctrl+c", "esc":
-			return m, tea.Quit
-
-		case "down":
-			m.lineNumber = min(len(m.content.lines)-1, m.lineNumber+1)
-			m.logger.With("line_number", m.lineNumber).Info("line number update down")
-			m.updateContent()
-
-		case "up":
-			m.lineNumber = max(0, m.lineNumber-1)
-			m.logger.With("line_number", m.lineNumber).Info("line number update up")
-			m.updateContent()
-
-		default:
-		}
-	}
-
-	var cmd tea.Cmd
-	m.viewport, cmd = m.viewport.Update(msg)
-	return m, cmd
-}
-
-func (m model) View() string {
-	if !m.ready || !m.content.ready {
-		return "\n Initializing..."
-	}
-
-	return m.viewport.View()
-}
-
-func (m model) fileView() string {
-	return strings.Join(m.content.lines, "\n")
-}
-
-func (m model) infoView() string {
-	if !m.content.ready {
-		return ""
-	}
-
-	infoBar := ""
-	for i := range m.content.lines {
-		md := m.content.metadata[i]
-		if i > 0 {
-			infoBar += "\n"
-		}
-		line := fmt.Sprintf(" | %s", md.author)
-		infoBar += line
-	}
-
-	return infoBar
-}
-
-type gitBlameOutput string
-
-func (m model) Init() tea.Cmd {
-	return func() tea.Msg {
-		cmd := exec.Command("git", "blame", "--porcelain", "-M", "-C", m.filePath)
-		buf, err := cmd.Output()
-		if err != nil {
-			fmt.Printf("failed to run git blame err=%v\n", err)
-			os.Exit(1)
-		}
-
-		m.logger.Info("loaded initial blame output")
-
-		return gitBlameOutput(string(buf))
-	}
-}
-
-func main() {
-	if len(os.Args) != 2 {
-		fmt.Println("file path is a required argument")
-		os.Exit(1)
-	}
-	filePath := os.Args[1]
-
-	fh, err := os.OpenFile(filePath, os.O_RDONLY, 0)
-	if err != nil {
-		fmt.Printf("can't open given file %#v\n", filePath)
-		os.Exit(1)
-	}
-
-	err = fh.Close()
-	if err != nil {
-		fmt.Println("failed to close the file")
-		os.Exit(1)
-	}
-
-	logFile, err := os.Create("tmp.log")
-	if err != nil {
-		fmt.Println("failed to create log file")
-	}
-	defer logFile.Close()
-
-	initialModel := model{
-		filePath: filePath,
-		logger:   slog.New(slog.NewTextHandler(logFile, nil)),
-	}
-	p := tea.NewProgram(
-		initialModel,
-		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
-	)
-	_, err = p.Run()
-	if err != nil {
-		fmt.Printf("failed to start err=%v", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("log file: %s\n", logFile.Name())
+	return res
 }
