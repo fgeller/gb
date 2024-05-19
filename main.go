@@ -38,7 +38,7 @@ func main() {
 func new() *container {
 	c := container{
 		app:     tview.NewApplication(),
-		chBlame: make(chan blameData),
+		chBlame: make(chan *blameData),
 		log:     []string{},
 	}
 	return &c
@@ -49,22 +49,45 @@ type container struct {
 
 	fileView *tview.TextView
 	infoView *tview.Table
+	menubar  *tview.TextView
 	flex     *tview.Flex
+	modal    *tview.Modal
+	pages    *tview.Pages
 
+	filePath  string
 	data      *blameData
 	lineCount int
 
 	currentLine int
 
-	chBlame chan blameData
+	chBlame chan *blameData
 	log     []string
 }
 
+func (c *container) usage() string {
+	type key struct {
+		code  string
+		descr string
+	}
+	keys := []key{
+		{code: "↑↓", descr: "to scroll"},
+		{code: "p", descr: "previous revision"},
+	}
+
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(fmt.Sprintf("[#2e2e2e]%s[#aeaeae] %s ", k.code, k.descr))
+	}
+	return b.String()
+}
+
 func (c *container) run(filePath string) {
+	c.filePath = filePath
 
 	c.fileView = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
+		SetWordWrap(false).
 		SetText("Loading...")
 
 	c.fileView.
@@ -76,15 +99,37 @@ func (c *container) run(filePath string) {
 	c.infoView.
 		SetBackgroundColor(tcell.ColorWhite.TrueColor())
 
-	c.flex = tview.NewFlex().
-		AddItem(c.fileView, 0, 6, true).
-		AddItem(c.infoView, 35, 4, true)
+	c.menubar = tview.NewTextView().
+		SetDynamicColors(true).
+		SetScrollable(false).
+		SetWordWrap(false)
 
-		// c.flex.SetBackgroundColor(tcell.ColorWhite.TrueColor())
+	c.menubar.
+		SetBackgroundColor(tcell.ColorWhite.TrueColor()).
+		SetBorder(true)
+
+	c.menubar.SetText(c.usage())
+
+	c.flex = tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(
+			tview.NewFlex().
+				AddItem(c.fileView, 0, 6, true).
+				AddItem(c.infoView, 35, 4, true),
+			0, 1, true,
+		).
+		AddItem(c.menubar, 3, 1, false)
 
 	c.app.SetRoot(c.flex, true)
 
-	go func() { c.chBlame <- blame(filePath) }()
+	go func() {
+		out, err := blame(filePath, "HEAD")
+		if err != nil {
+			fmt.Println("failed to get initial blame output")
+			os.Exit(1)
+		}
+		c.chBlame <- out
+	}()
 	go func() { c.receive() }()
 
 	c.setKeys()
@@ -99,7 +144,7 @@ func (c *container) receive() {
 	for {
 		select {
 		case out := <-c.chBlame:
-			c.data = &out
+			c.data = out
 			c.lineCount = len(out.lines)
 			c.currentLine = 0
 
@@ -122,7 +167,9 @@ func (c *container) receive() {
 				c.infoView.SetCell(i, 1, authorTime)
 				c.infoView.SetCell(i, 2, sha)
 			}
+
 			c.infoView.SetOffset(0, 0)
+			c.fileView.ScrollTo(0, 0)
 
 			c.highlightCurrentLine()
 			c.app.Draw()
@@ -215,10 +262,30 @@ func (c *container) setKeys() {
 		case tcell.KeyEscape, tcell.KeyCtrlC:
 			c.app.Stop()
 		case tcell.KeyRune:
-			if event.Rune() == 'q' {
+			switch event.Rune() {
+			case 'q':
 				c.app.Stop()
 				for _, line := range c.log {
 					fmt.Println(line)
+				}
+			case 'p': // previous
+				if c.data != nil {
+					lineMeta := c.data.metadata[c.currentLine]
+					beforeRev := fmt.Sprintf("%s^", lineMeta.sha)
+					go func(rev string) {
+						out, err := blame(c.filePath, rev)
+						if err != nil {
+							c.menubar.SetText("[#ff5544]reached first revision[#000000]")
+							c.app.Draw()
+							go func() {
+								<-time.After(2 * time.Second)
+								c.menubar.SetText(c.usage())
+								c.app.Draw()
+							}()
+							return
+						}
+						c.chBlame <- out
+					}(beforeRev)
 				}
 			}
 		}
@@ -226,8 +293,18 @@ func (c *container) setKeys() {
 	})
 }
 
-func blame(filePath string) blameData {
-	cmd := exec.Command("git", "blame", "--porcelain", "-M", "-C", filePath)
+func blame(filePath string, upTo string) (*blameData, error) {
+	cmd := exec.Command("git", "rev-parse", upTo)
+	cmd.Dir = filepath.Dir(filePath)
+	err := cmd.Run()
+	if err != nil {
+		return nil, err
+	}
+
+	args := []string{"blame", "--porcelain", "-M", "-C"}
+	args = append(args, upTo)
+	args = append(args, "--", filePath)
+	cmd = exec.Command("git", args...)
 	cmd.Dir = filepath.Dir(filePath)
 	buf, err := cmd.Output()
 	if err != nil {
@@ -235,7 +312,7 @@ func blame(filePath string) blameData {
 		os.Exit(1)
 	}
 
-	return parseBlameOutput(string(buf))
+	return parseBlameOutput(string(buf)), nil
 }
 
 type commit struct {
@@ -250,7 +327,7 @@ type blameData struct {
 }
 
 // parses the git blame output
-func parseBlameOutput(out string) blameData {
+func parseBlameOutput(out string) *blameData {
 	res := blameData{
 		metadata: map[int]*commit{},
 		lines:    []string{},
@@ -298,5 +375,5 @@ func parseBlameOutput(out string) blameData {
 
 	}
 
-	return res
+	return &res
 }
