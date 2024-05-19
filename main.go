@@ -185,10 +185,18 @@ func (c *container) receive() {
 			title += fmt.Sprintf(" @ [#4CAF50]%s[#000000] ", youngestRev.sha[:7])
 			c.titlebar.SetText(title)
 
+			maxAuthorLen := 0
+			for _, c := range out.sortedCommits {
+				if len(c.author.name) > maxAuthorLen {
+					maxAuthorLen = len(c.author.name)
+				}
+			}
+
 			for i := range out.lines {
 				cm := out.lineCommits[i]
+				paddedAuthor := cm.author.name + strings.Repeat(" ", maxAuthorLen-len(cm.author.name))
 
-				author := tview.NewTableCell(cm.author.name).
+				author := tview.NewTableCell(paddedAuthor).
 					SetTextColor(cm.author.color.TrueColor()).
 					SetBackgroundColor(tcell.ColorWhite.TrueColor())
 
