@@ -123,7 +123,7 @@ func (c *container) run(filePath string) {
 	c.app.SetRoot(c.flex, true)
 
 	go func() {
-		out, err := blame(filePath, "HEAD")
+		out, err := blame(filePath, "")
 		if err != nil {
 			fmt.Println("failed to get initial blame output")
 			os.Exit(1)
@@ -198,16 +198,16 @@ func (c *container) highlightCurrentLine() {
 		if i > 0 {
 			b.WriteString("\n")
 		}
+		escaped := tview.Escape(line)
 		if i == c.currentLine {
-			padded := line
+			padded := escaped
 			delta := width - renderedLen(line)
 			if delta > 0 {
 				padded += strings.Repeat(" ", delta)
 			}
 			b.WriteString("[#000000:#e8ecf0]" + padded + "[#000000:#ffffff]")
 		} else {
-
-			b.WriteString(line)
+			b.WriteString(escaped)
 		}
 	}
 
@@ -294,17 +294,21 @@ func (c *container) setKeys() {
 }
 
 func blame(filePath string, upTo string) (*blameData, error) {
-	cmd := exec.Command("git", "rev-parse", upTo)
-	cmd.Dir = filepath.Dir(filePath)
-	err := cmd.Run()
-	if err != nil {
-		return nil, err
+	if upTo != "" {
+		cmd := exec.Command("git", "rev-parse", upTo)
+		cmd.Dir = filepath.Dir(filePath)
+		err := cmd.Run()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	args := []string{"blame", "--porcelain", "-M", "-C"}
-	args = append(args, upTo)
+	if upTo != "" {
+		args = append(args, upTo)
+	}
 	args = append(args, "--", filePath)
-	cmd = exec.Command("git", args...)
+	cmd := exec.Command("git", args...)
 	cmd.Dir = filepath.Dir(filePath)
 	buf, err := cmd.Output()
 	if err != nil {
