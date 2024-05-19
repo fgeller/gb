@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -168,18 +169,18 @@ func (c *container) receive() {
 			c.currentLine = 0
 
 			for i := range out.lines {
-				md := out.lineCommits[i]
+				cm := out.lineCommits[i]
 
-				author := tview.NewTableCell(md.author).
-					SetTextColor(tcell.ColorBlack.TrueColor()).
+				author := tview.NewTableCell(cm.author.name).
+					SetTextColor(cm.author.color.TrueColor()).
 					SetBackgroundColor(tcell.ColorWhite.TrueColor())
 
-				authorTime := tview.NewTableCell(md.authorTime.Format("2006-01-02")).
-					SetTextColor(tcell.ColorBlack.TrueColor()).
+				authorTime := tview.NewTableCell(cm.authorTime.Format("2006-01-02")).
+					SetTextColor(tcell.GetColor("#F57F17").TrueColor()).
 					SetBackgroundColor(tcell.ColorWhite.TrueColor())
 
-				sha := tview.NewTableCell(md.sha[:7]).
-					SetTextColor(tcell.ColorBlack.TrueColor()).
+				sha := tview.NewTableCell(cm.sha[:7]).
+					SetTextColor(cm.color.TrueColor()).
 					SetBackgroundColor(tcell.ColorWhite.TrueColor())
 
 				c.infoView.SetCell(i, 0, author)
@@ -409,10 +410,16 @@ func blame(filePath string, upTo string) (*blameData, error) {
 	return parseBlameOutput(string(buf)), nil
 }
 
+type author struct {
+	name  string
+	color tcell.Color
+}
+
 type commit struct {
-	author     string
+	author     *author
 	authorTime time.Time
 	sha        string
+	color      tcell.Color
 }
 
 type blameData struct {
@@ -453,9 +460,10 @@ func parseBlameOutput(out string) *blameData {
 		}
 
 		if strings.HasPrefix(rawLine, "author ") {
-			meta.author = rawLine[len("author "):]
-			if meta.author == "Not Committed Yet" {
-				meta.author = "uncommitted"
+			meta.author = &author{}
+			meta.author.name = rawLine[len("author "):]
+			if meta.author.name == "Not Committed Yet" {
+				meta.author.name = "uncommitted"
 			}
 		}
 		if strings.HasPrefix(rawLine, "author-time ") {
@@ -469,10 +477,15 @@ func parseBlameOutput(out string) *blameData {
 		}
 	}
 
+	authors := map[string]*author{}
+
 	for _, c := range commits {
 		if c.sha == "0000000000000000000000000000000000000000" {
+			c.color = tcell.GetColor("#ee6002")
 			continue
 		}
+		c.author.color = tcell.GetColor(authorColor(c.author.name))
+		authors[c.author.name] = c.author
 		res.sortedCommits = append(res.sortedCommits, c)
 	}
 	sort.SliceStable(res.sortedCommits, func(i, j int) bool {
@@ -480,5 +493,61 @@ func parseBlameOutput(out string) *blameData {
 		return ci.authorTime.After(cj.authorTime)
 	})
 
+	commitShades := generateShades("#01579B", "#4FC3F7", len(res.sortedCommits))
+	for i, c := range res.sortedCommits {
+		c.color = commitShades[i]
+	}
+
 	return &res
+}
+
+func hashString(s string) uint32 {
+	h := fnv.New32a()
+	h.Write([]byte(s))
+	return h.Sum32()
+}
+
+func intToHex(n int) string {
+	return fmt.Sprintf("%02x", n)
+}
+
+func authorColor(a string) string {
+	hash := hashString(a)
+
+	r := int((hash >> 16) & 0xFF)
+	g := int((hash >> 8) & 0xFF)
+	b := int(hash & 0xFF)
+
+	return rgbToHex(r, g, b)
+}
+
+func hexToRGB(hex string) (int, int, int) {
+	var r, g, b int
+	fmt.Sscanf(hex, "#%02x%02x%02x", &r, &g, &b)
+	return r, g, b
+}
+
+func rgbToHex(r, g, b int) string {
+	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
+}
+
+func interpolateColor(r1, g1, b1, r2, g2, b2 int, factor float64) (int, int, int) {
+	r := int(float64(r1) + (float64(r2)-float64(r1))*factor)
+	g := int(float64(g1) + (float64(g2)-float64(g1))*factor)
+	b := int(float64(b1) + (float64(b2)-float64(b1))*factor)
+	return r, g, b
+}
+
+func generateShades(dark, light string, count int) []tcell.Color {
+	r1, g1, b1 := hexToRGB(dark)
+	r2, g2, b2 := hexToRGB(light)
+
+	shades := make([]tcell.Color, count)
+	for i := 0; i < count; i++ {
+		factor := float64(i) / float64(count-1)
+		r, g, b := interpolateColor(r1, g1, b1, r2, g2, b2, factor)
+		shades[i] = tcell.GetColor(rgbToHex(r, g, b))
+	}
+
+	return shades
 }
