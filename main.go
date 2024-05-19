@@ -87,6 +87,7 @@ func (c *container) menuContent() string {
 		{code: "P", descr: "previous rev to line"},
 		{code: "n", descr: "next rev"},
 		{code: "l", descr: "commit summary"},
+		{code: "g", descr: "open gh pr"},
 	}
 	for _, k := range keys {
 		str := fmt.Sprintf(
