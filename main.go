@@ -106,6 +106,7 @@ func (c *container) run(filePath string) {
 	c.fileView = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
+		SetWrap(false).
 		SetWordWrap(false).
 		SetText("Loading...")
 
@@ -213,7 +214,7 @@ func (c *container) highlightCurrentLine() {
 		res := 0
 		for _, r := range str {
 			if r == '\t' {
-				res += 4
+				res += tview.TabSize
 			} else {
 				res += 1
 			}
