@@ -66,7 +66,8 @@ type container struct {
 	revListDesc   []string
 	githubBaseURL string
 
-	currentLine int
+	currentLine       int
+	readingLineNumber *string
 
 	chBlame chan *blameData
 	log     []string
@@ -260,7 +261,7 @@ func (c *container) highlightCurrentLine() {
 	c.fileView.SetText(b.String())
 
 	colCount := c.infoView.GetColumnCount()
-	for row := max(0, c.currentLine-1); row <= min(c.currentLine+1, c.lineCount); row++ {
+	for row := 0; row < c.lineCount; row++ {
 		for i := 0; i < colCount; i++ {
 			cell := c.infoView.GetCell(row, i)
 			if row == c.currentLine {
@@ -330,6 +331,19 @@ func (c *container) scrollUp() {
 	c.highlightCurrentLine()
 }
 
+func (c *container) gotoLine(nr int) {
+	c.currentLine = nr
+	_, _, _, height := c.fileView.GetInnerRect()
+
+	rowOffset := max(0, c.currentLine-(height/2))
+	rowOffset = min(c.lineCount-1, rowOffset)
+
+	c.fileView.ScrollTo(rowOffset, 0)
+	c.infoView.SetOffset(rowOffset, 0)
+
+	c.highlightCurrentLine()
+}
+
 func (c *container) setKeys() {
 	c.fileView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
@@ -345,6 +359,7 @@ func (c *container) setKeys() {
 		}
 
 		if c.data == nil {
+			c.readingLineNumber = nil
 			return nil
 		}
 
@@ -358,6 +373,8 @@ func (c *container) setKeys() {
 			switch event.Rune() {
 			case 'g':
 				c.openPullRequest()
+			case 'G':
+				c.gotoReadLine()
 			case 'l':
 				c.showLogSummary()
 			case '<':
@@ -368,11 +385,42 @@ func (c *container) setKeys() {
 				c.afterLineRevision()
 			case 'b':
 				c.beforeLineRevision()
+			case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+				c.readLineNumber(event.Rune())
+				return nil
 			}
 		}
 
+		c.readingLineNumber = nil
 		return nil
 	})
+}
+
+func (c *container) gotoReadLine() {
+	if c.readingLineNumber == nil {
+		return
+	}
+	i, err := strconv.Atoi(*c.readingLineNumber)
+	if err != nil {
+		c.log = append(c.log, fmt.Sprintf("failed to convert read line number err=%v", err))
+		return
+	}
+	if i < 1 || i > len(c.data.lines) {
+		c.log = append(c.log, fmt.Sprintf("read line number %#v is out of bunds", i))
+		return
+	}
+	c.gotoLine(i - 1)
+}
+
+func (c *container) readLineNumber(rn rune) {
+	strRune := string(rn)
+	if c.readingLineNumber == nil {
+		c.readingLineNumber = &strRune
+		return
+	}
+
+	newNumber := *c.readingLineNumber + strRune
+	c.readingLineNumber = &newNumber
 }
 
 func (c *container) openPullRequest() {
