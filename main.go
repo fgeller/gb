@@ -1,11 +1,15 @@
 package main
 
 import (
+	"crypto/sha1"
 	"fmt"
 	"hash/fnv"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -54,10 +58,11 @@ type container struct {
 	menubar  *tview.TextView
 	flex     *tview.Flex
 
-	filePath    string
-	data        *blameData
-	lineCount   int
-	revListDesc []string
+	filePath      string
+	data          *blameData
+	lineCount     int
+	revListDesc   []string
+	githubBaseURL string
 
 	currentLine int
 
@@ -143,6 +148,8 @@ func (c *container) run(filePath string) {
 			fmt.Println("failed to get rev list")
 			os.Exit(1)
 		}
+
+		c.setGithubBaseURL(filePath)
 
 		out, err := blame(filePath, "")
 		if err != nil {
@@ -251,6 +258,26 @@ var (
 	scrollMargin = 3
 )
 
+func extractPullRequestReference(summary string) string {
+	rxPRRef := regexp.MustCompile(`#([0-9]+)`)
+	matches := rxPRRef.FindAllStringSubmatch(summary, -1)
+	if len(matches) == 1 && len(matches[0]) == 2 {
+		return matches[0][1]
+	}
+	return ""
+}
+
+func openURL(url string) {
+	switch runtime.GOOS {
+	case "darwin":
+		exec.Command("open", url).Run()
+	case "linux":
+		exec.Command("xdg-open", url).Run()
+	case "windows":
+		exec.Command("cmd.exe", "/C", "start", url).Run()
+	}
+}
+
 func (c *container) setKeys() {
 	c.fileView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		_, _, _, height := c.fileView.GetInnerRect()
@@ -289,6 +316,27 @@ func (c *container) setKeys() {
 				for _, line := range c.log {
 					fmt.Println(line)
 				}
+			case 'g':
+				if c.data == nil {
+					return nil
+				}
+				cm := c.data.lineCommits[c.currentLine]
+				c.info(cm.summary)
+				if c.githubBaseURL == "" {
+					return nil
+				}
+				prRef := extractPullRequestReference(cm.summary)
+				if prRef == "" {
+					return nil
+				}
+				prURL, err := url.JoinPath(c.githubBaseURL, "pull", prRef)
+				if err != nil {
+					c.log = append(c.log, fmt.Sprintf("failed to construct pr url err=%v", err))
+					return nil
+				}
+				openURL(prURL)
+				return nil
+
 			case 'l':
 				if c.data == nil {
 					return nil
@@ -326,7 +374,6 @@ func (c *container) setKeys() {
 					if rev != youngestSha {
 						continue
 					}
-					c.warn(fmt.Sprintf("i=%v len()=%v", i, len(c.revListDesc)))
 					if i == len(c.revListDesc)-1 {
 						c.warn("reached oldest revision")
 						return nil
@@ -400,6 +447,37 @@ func revList(filePath string) ([]string, error) {
 	revList := strings.Split(strings.TrimSpace(string(buf)), "\n")
 	return revList, nil
 
+}
+
+func (c *container) setGithubBaseURL(filePath string) {
+	args := []string{"remote", "-v"}
+	cmd := exec.Command("git", args...)
+	cmd.Dir = filepath.Dir(filePath)
+	buf, err := cmd.Output()
+	if err != nil {
+		c.log = append(c.log, fmt.Sprintf("failed to run git remote err=%v", err))
+		return
+	}
+
+	rxSSH := regexp.MustCompile(`git@github.com:(.+)\.git`)
+	rxHTTP := regexp.MustCompile(`https://github.com/(.+)\.git`)
+
+	for _, line := range strings.Split(strings.TrimSpace(string(buf)), "\n") {
+		matches := rxSSH.FindAllStringSubmatch(line, -1)
+		if len(matches) == 1 && len(matches[0]) == 2 {
+			repo := matches[0][1]
+			c.githubBaseURL = fmt.Sprintf("https://github.com/%v", repo)
+			return
+		}
+
+		matches = rxHTTP.FindAllStringSubmatch(line, -1)
+		if len(matches) == 1 && len(matches[0]) == 2 {
+			repo := matches[0][1]
+			c.githubBaseURL = fmt.Sprintf("https://github.com/%v", repo)
+			return
+		}
+	}
+	c.log = append(c.log, fmt.Sprintf("didn't find github base url"))
 }
 
 func blame(filePath string, upTo string) (*blameData, error) {
@@ -534,14 +612,17 @@ func intToHex(n int) string {
 	return fmt.Sprintf("%02x", n)
 }
 
-func authorColor(a string) string {
-	hash := hashString(a)
+func hashToColor(hash [20]byte) string {
+	r := hash[0]
+	g := hash[1]
+	b := hash[2]
 
-	r := int((hash >> 16) & 0xFF)
-	g := int((hash >> 8) & 0xFF)
-	b := int(hash & 0xFF)
+	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
+}
 
-	return rgbToHex(r, g, b)
+func authorColor(author string) string {
+	hash := sha1.Sum([]byte(author))
+	return hashToColor(hash)
 }
 
 func hexToRGB(hex string) (int, int, int) {
