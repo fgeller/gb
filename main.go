@@ -53,12 +53,13 @@ func new() *container {
 type container struct {
 	app *tview.Application
 
-	fileView *tview.TextView
-	infoView *tview.Table
-	menubar  *tview.TextView
-	titlebar *tview.TextView
-	flexRoot *tview.Flex
-	flexMain *tview.Flex
+	fileView    *tview.TextView
+	infoView    *tview.Table
+	lineNumbers *tview.TextView
+	menubar     *tview.TextView
+	titlebar    *tview.TextView
+	flexRoot    *tview.Flex
+	flexMain    *tview.Flex
 
 	filePath      string
 	data          *blameData
@@ -134,7 +135,15 @@ func (c *container) run(filePath string) {
 		SetBackgroundColor(tcell.GetColor("#e8ecf0").TrueColor())
 	c.titlebar.SetText(filepath.Base(c.filePath))
 
+	c.lineNumbers = tview.NewTextView().
+		SetDynamicColors(true).
+		SetScrollable(true)
+
+	c.lineNumbers.SetBackgroundColor(tcell.ColorWhite.TrueColor())
+	c.lineNumbers.SetTextColor(tcell.GetColor("#9e9e9e").TrueColor())
+
 	c.flexMain = tview.NewFlex().
+		AddItem(c.lineNumbers, 4, 1, false).
 		AddItem(c.fileView, 0, 8, true).
 		AddItem(c.infoView, 0, 2, true)
 
@@ -194,6 +203,9 @@ func (c *container) receive() {
 			}
 			c.flexMain.ResizeItem(c.infoView, maxAuthorLen+1+10+1+7, 3)
 
+			lineCount := fmt.Sprintf("%v", len(c.data.lines))
+			c.flexMain.ResizeItem(c.lineNumbers, len(lineCount)+2, 1)
+
 			for i := range out.lines {
 				cm := out.lineCommits[i]
 				paddedAuthor := cm.author.name + strings.Repeat(" ", maxAuthorLen-len(cm.author.name))
@@ -215,10 +227,7 @@ func (c *container) receive() {
 				c.infoView.SetCell(i, 2, sha)
 			}
 
-			c.infoView.SetOffset(0, 0)
-			c.fileView.ScrollTo(0, 0)
-
-			c.highlightCurrentLine()
+			c.scrollTo(0)
 			c.menubar.SetText(c.menuContent())
 			c.app.Draw()
 		}
@@ -257,8 +266,25 @@ func (c *container) highlightCurrentLine() {
 			b.WriteString(escaped)
 		}
 	}
-
 	c.fileView.SetText(b.String())
+
+	b = strings.Builder{}
+	lineCount := fmt.Sprintf("%v", len(c.data.lines))
+
+	for i := range c.data.lines {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		num := fmt.Sprintf("%v", i+1)
+		num = strings.Repeat(" ", len(lineCount)-len(num)) + num
+		num = " " + num + " "
+		if i == c.currentLine {
+			b.WriteString("[#000000:#e8ecf0]" + num + "[#9e9e9e:#ffffff]")
+		} else {
+			b.WriteString(num)
+		}
+	}
+	c.lineNumbers.SetText(b.String())
 
 	colCount := c.infoView.GetColumnCount()
 	for row := 0; row < c.lineCount; row++ {
@@ -305,19 +331,25 @@ func (c *container) stop() {
 }
 
 func (c *container) scrollDown() {
-	_, _, _, height := c.fileView.GetInnerRect()
-
 	rowOffset, _ := c.fileView.GetScrollOffset()
 	c.currentLine = min(c.lineCount-1, c.currentLine+1)
 
+	_, _, _, height := c.fileView.GetInnerRect()
 	if c.currentLine >= rowOffset+height-scrollMargin {
 		rowOffset += 1
 	}
-	c.fileView.ScrollTo(rowOffset, 0)
-	c.infoView.SetOffset(rowOffset, 0)
+
+	c.scrollTo(rowOffset)
+}
+
+func (c *container) scrollTo(offset int) {
+	c.fileView.ScrollTo(offset, 0)
+	c.infoView.SetOffset(offset, 0)
+	c.lineNumbers.ScrollTo(offset, 0)
 
 	c.highlightCurrentLine()
 }
+
 func (c *container) scrollUp() {
 	rowOffset, _ := c.fileView.GetScrollOffset()
 	c.currentLine = max(0, c.currentLine-1)
@@ -325,10 +357,7 @@ func (c *container) scrollUp() {
 	if c.currentLine < rowOffset+scrollMargin {
 		rowOffset -= 1
 	}
-	c.fileView.ScrollTo(rowOffset, 0)
-	c.infoView.SetOffset(rowOffset, 0)
-
-	c.highlightCurrentLine()
+	c.scrollTo(rowOffset)
 }
 
 func (c *container) gotoLine(nr int) {
@@ -338,10 +367,7 @@ func (c *container) gotoLine(nr int) {
 	rowOffset := max(0, c.currentLine-(height/2))
 	rowOffset = min(c.lineCount-1, rowOffset)
 
-	c.fileView.ScrollTo(rowOffset, 0)
-	c.infoView.SetOffset(rowOffset, 0)
-
-	c.highlightCurrentLine()
+	c.scrollTo(rowOffset)
 }
 
 func (c *container) setKeys() {
