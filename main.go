@@ -81,6 +81,7 @@ func (c *container) menuContent() string {
 		{code: "p", descr: "previous rev"},
 		{code: "P", descr: "previous rev to line"},
 		{code: "n", descr: "next rev"},
+		{code: "l", descr: "commit summary"},
 	}
 	for _, k := range keys {
 		str := fmt.Sprintf(
@@ -288,6 +289,13 @@ func (c *container) setKeys() {
 				for _, line := range c.log {
 					fmt.Println(line)
 				}
+			case 'l':
+				if c.data == nil {
+					return nil
+				}
+				cm := c.data.lineCommits[c.currentLine]
+				c.info(cm.summary)
+				return nil
 
 			case 'n': // next rev
 				if c.data == nil {
@@ -370,6 +378,16 @@ func (c *container) warn(msg string) {
 	}()
 }
 
+func (c *container) info(msg string) {
+	go func() {
+		c.menubar.SetText(fmt.Sprintf("[#000000]%s[#000000]", msg))
+		c.app.Draw()
+		<-time.After(2 * time.Second)
+		c.menubar.SetText(c.menuContent())
+		c.app.Draw()
+	}()
+}
+
 func revList(filePath string) ([]string, error) {
 	args := []string{"rev-list", "HEAD", "--", filePath}
 	cmd := exec.Command("git", args...)
@@ -420,6 +438,7 @@ type commit struct {
 	authorTime time.Time
 	sha        string
 	color      tcell.Color
+	summary    string
 }
 
 type blameData struct {
@@ -474,6 +493,10 @@ func parseBlameOutput(out string) *blameData {
 				os.Exit(1)
 			}
 			meta.authorTime = time.Unix(num, 0)
+		}
+		if strings.HasPrefix(rawLine, "summary ") {
+			trimmed := strings.TrimPrefix(rawLine, "summary ")
+			meta.summary = trimmed
 		}
 	}
 
