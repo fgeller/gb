@@ -57,7 +57,8 @@ type container struct {
 	infoView *tview.Table
 	menubar  *tview.TextView
 	titlebar *tview.TextView
-	flex     *tview.Flex
+	flexRoot *tview.Flex
+	flexMain *tview.Flex
 
 	filePath      string
 	data          *blameData
@@ -132,18 +133,17 @@ func (c *container) run(filePath string) {
 		SetBackgroundColor(tcell.GetColor("#e8ecf0").TrueColor())
 	c.titlebar.SetText(filepath.Base(c.filePath))
 
-	c.flex = tview.NewFlex().
+	c.flexMain = tview.NewFlex().
+		AddItem(c.fileView, 0, 8, true).
+		AddItem(c.infoView, 0, 2, true)
+
+	c.flexRoot = tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(c.titlebar, 1, 1, false).
-		AddItem(
-			tview.NewFlex().
-				AddItem(c.fileView, 0, 6, true).
-				AddItem(c.infoView, 35, 4, true),
-			0, 1, true,
-		).
+		AddItem(c.flexMain, 0, 1, true).
 		AddItem(c.menubar, 1, 1, false)
 
-	c.app.SetRoot(c.flex, true)
+	c.app.SetRoot(c.flexRoot, true)
 
 	go func() {
 		var err error
@@ -182,7 +182,7 @@ func (c *container) receive() {
 
 			title := filepath.Base(c.filePath)
 			youngestRev := c.data.sortedCommits[0]
-			title += fmt.Sprintf(" @ [#4CAF50]%s[#000000] ", youngestRev.sha[:7])
+			title += fmt.Sprintf(" @ [#4CAF50]%s[#000000]: %s", youngestRev.sha[:7], youngestRev.summary)
 			c.titlebar.SetText(title)
 
 			maxAuthorLen := 0
@@ -191,6 +191,7 @@ func (c *container) receive() {
 					maxAuthorLen = len(c.author.name)
 				}
 			}
+			c.flexMain.ResizeItem(c.infoView, maxAuthorLen+1+10+1+7, 3)
 
 			for i := range out.lines {
 				cm := out.lineCommits[i]
