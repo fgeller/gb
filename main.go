@@ -56,6 +56,7 @@ type container struct {
 	fileView *tview.TextView
 	infoView *tview.Table
 	menubar  *tview.TextView
+	titlebar *tview.TextView
 	flex     *tview.Flex
 
 	filePath      string
@@ -72,26 +73,21 @@ type container struct {
 
 func (c *container) menuContent() string {
 	var b strings.Builder
-	if c.data != nil && len(c.data.sortedCommits) > 0 {
-		youngestRev := c.data.sortedCommits[0]
-		b.WriteString(fmt.Sprintf("[#68c25f]%s[#000000] ", youngestRev.sha[:7]))
-	}
 
 	type key struct {
 		code  string
 		descr string
 	}
 	keys := []key{
-		{code: "↑↓", descr: "to scroll"},
-		{code: "p", descr: "previous rev"},
-		{code: "P", descr: "previous rev to line"},
-		{code: "n", descr: "next rev"},
+		{code: "↑↓", descr: "scroll"},
+		{code: "<>", descr: "file rev"},
+		{code: "ba", descr: "before/after line rev"},
 		{code: "l", descr: "commit summary"},
 		{code: "g", descr: "open gh pr"},
 	}
 	for _, k := range keys {
 		str := fmt.Sprintf(
-			"[#2e2e2e]%s[#000000] [#aeaeae]%s[#000000] ",
+			"[#4CAF50]%s[#000000] [#000000]%s[#000000] ",
 			k.code,
 			k.descr,
 		)
@@ -122,24 +118,30 @@ func (c *container) run(filePath string) {
 
 	c.menubar = tview.NewTextView().
 		SetDynamicColors(true).
-		SetScrollable(false).
-		SetWordWrap(false)
-
+		SetScrollable(false)
 	c.menubar.
-		SetBackgroundColor(tcell.ColorWhite.TrueColor()).
-		SetBorder(true)
-
+		SetTextColor(tcell.GetColor("#000000").TrueColor()).
+		SetBackgroundColor(tcell.GetColor("#e8ecf0").TrueColor())
 	c.menubar.SetText(c.menuContent())
+
+	c.titlebar = tview.NewTextView().
+		SetDynamicColors(true).
+		SetScrollable(false)
+	c.titlebar.
+		SetTextColor(tcell.GetColor("#000000").TrueColor()).
+		SetBackgroundColor(tcell.GetColor("#e8ecf0").TrueColor())
+	c.titlebar.SetText(filepath.Base(c.filePath))
 
 	c.flex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
+		AddItem(c.titlebar, 1, 1, false).
 		AddItem(
 			tview.NewFlex().
 				AddItem(c.fileView, 0, 6, true).
 				AddItem(c.infoView, 35, 4, true),
 			0, 1, true,
 		).
-		AddItem(c.menubar, 3, 1, false)
+		AddItem(c.menubar, 1, 1, false)
 
 	c.app.SetRoot(c.flex, true)
 
@@ -178,6 +180,11 @@ func (c *container) receive() {
 			c.lineCount = len(out.lines)
 			c.currentLine = 0
 
+			title := filepath.Base(c.filePath)
+			youngestRev := c.data.sortedCommits[0]
+			title += fmt.Sprintf(" @ [#4CAF50]%s[#000000] ", youngestRev.sha[:7])
+			c.titlebar.SetText(title)
+
 			for i := range out.lines {
 				cm := out.lineCommits[i]
 
@@ -186,7 +193,7 @@ func (c *container) receive() {
 					SetBackgroundColor(tcell.ColorWhite.TrueColor())
 
 				authorTime := tview.NewTableCell(cm.authorTime.Format("2006-01-02")).
-					SetTextColor(tcell.GetColor("#F57F17").TrueColor()).
+					SetTextColor(tcell.GetColor("#2E7D32").TrueColor()).
 					SetBackgroundColor(tcell.ColorWhite.TrueColor())
 
 				sha := tview.NewTableCell(cm.sha[:7]).
@@ -280,131 +287,178 @@ func openURL(url string) {
 	}
 }
 
+func (c *container) stop() {
+	c.app.Stop()
+	for _, line := range c.log {
+		fmt.Println(line)
+	}
+}
+
+func (c *container) scrollDown() {
+	_, _, _, height := c.fileView.GetInnerRect()
+
+	rowOffset, _ := c.fileView.GetScrollOffset()
+	c.currentLine = min(c.lineCount-1, c.currentLine+1)
+
+	if c.currentLine >= rowOffset+height-scrollMargin {
+		rowOffset += 1
+	}
+	c.fileView.ScrollTo(rowOffset, 0)
+	c.infoView.SetOffset(rowOffset, 0)
+
+	c.highlightCurrentLine()
+}
+func (c *container) scrollUp() {
+	rowOffset, _ := c.fileView.GetScrollOffset()
+	c.currentLine = max(0, c.currentLine-1)
+
+	if c.currentLine < rowOffset+scrollMargin {
+		rowOffset -= 1
+	}
+	c.fileView.ScrollTo(rowOffset, 0)
+	c.infoView.SetOffset(rowOffset, 0)
+
+	c.highlightCurrentLine()
+}
+
 func (c *container) setKeys() {
 	c.fileView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		_, _, _, height := c.fileView.GetInnerRect()
-
 		switch event.Key() {
-		case tcell.KeyDown:
-			rowOffset, _ := c.fileView.GetScrollOffset()
-			c.currentLine = min(c.lineCount-1, c.currentLine+1)
-
-			if c.currentLine >= rowOffset+height-scrollMargin {
-				rowOffset += 1
-			}
-			c.fileView.ScrollTo(rowOffset, 0)
-			c.infoView.SetOffset(rowOffset, 0)
-
-			c.highlightCurrentLine()
-
-		case tcell.KeyUp:
-			rowOffset, _ := c.fileView.GetScrollOffset()
-			c.currentLine = max(0, c.currentLine-1)
-
-			if c.currentLine < rowOffset+scrollMargin {
-				rowOffset -= 1
-			}
-			c.fileView.ScrollTo(rowOffset, 0)
-			c.infoView.SetOffset(rowOffset, 0)
-
-			c.highlightCurrentLine()
-
 		case tcell.KeyEscape, tcell.KeyCtrlC:
-			c.app.Stop()
+			c.stop()
+			return nil
 		case tcell.KeyRune:
 			switch event.Rune() {
 			case 'q':
-				c.app.Stop()
-				for _, line := range c.log {
-					fmt.Println(line)
-				}
-			case 'g':
-				if c.data == nil {
-					return nil
-				}
-				cm := c.data.lineCommits[c.currentLine]
-				c.info(cm.summary)
-				if c.githubBaseURL == "" {
-					return nil
-				}
-				prRef := extractPullRequestReference(cm.summary)
-				if prRef == "" {
-					return nil
-				}
-				prURL, err := url.JoinPath(c.githubBaseURL, "pull", prRef)
-				if err != nil {
-					c.log = append(c.log, fmt.Sprintf("failed to construct pr url err=%v", err))
-					return nil
-				}
-				openURL(prURL)
+				c.stop()
 				return nil
-
-			case 'l':
-				if c.data == nil {
-					return nil
-				}
-				cm := c.data.lineCommits[c.currentLine]
-				c.info(cm.summary)
-				return nil
-
-			case 'n': // next rev
-				if c.data == nil {
-					return nil
-				}
-				youngestSha := c.data.sortedCommits[0].sha
-				for i, rev := range c.revListDesc {
-					if rev != youngestSha {
-						continue
-					}
-					if i == 0 {
-						c.warn("reached youngest revision")
-						return nil
-					}
-					nextSha := c.revListDesc[i-1]
-					c.newRevision(nextSha)
-					return nil
-				}
-				return nil
-
-			case 'p': // previous rev
-				if c.data == nil {
-					return nil
-				}
-
-				youngestSha := c.data.sortedCommits[0].sha
-				for i, rev := range c.revListDesc {
-					if rev != youngestSha {
-						continue
-					}
-					if i == len(c.revListDesc)-1 {
-						c.warn("reached oldest revision")
-						return nil
-					}
-					nextSha := c.revListDesc[i+1]
-					c.newRevision(nextSha)
-					return nil
-				}
-				return nil
-
-			case 'P': // previous to line
-				if c.data == nil {
-					return nil
-				}
-
-				lineMeta := c.data.lineCommits[c.currentLine]
-				beforeRev := fmt.Sprintf("%s^", lineMeta.sha)
-				go func(rev string) {
-					out, err := blame(c.filePath, rev)
-					if err != nil {
-						c.warn("reached oldest revision")
-						return
-					}
-					c.chBlame <- out
-				}(beforeRev)
 			}
 		}
+
+		if c.data == nil {
+			return nil
+		}
+
+		switch event.Key() {
+		case tcell.KeyDown:
+			c.scrollDown()
+		case tcell.KeyUp:
+			c.scrollUp()
+
+		case tcell.KeyRune:
+			switch event.Rune() {
+			case 'g':
+				c.openPullRequest()
+			case 'l':
+				c.showLogSummary()
+			case '<':
+				c.previousFileRevision()
+			case '>':
+				c.nextFileRevision()
+			case 'a':
+				c.afterLineRevision()
+			case 'b':
+				c.beforeLineRevision()
+			}
+		}
+
 		return nil
 	})
+}
+
+func (c *container) openPullRequest() {
+	cm := c.data.lineCommits[c.currentLine]
+	c.showLogSummary()
+
+	if c.githubBaseURL == "" {
+		return
+	}
+
+	prRef := extractPullRequestReference(cm.summary)
+	if prRef == "" {
+		return
+	}
+
+	prURL, err := url.JoinPath(c.githubBaseURL, "pull", prRef)
+	if err != nil {
+		c.log = append(c.log, fmt.Sprintf("failed to construct pr url err=%v", err))
+		return
+	}
+
+	openURL(prURL)
+}
+
+func (c *container) showLogSummary() {
+	cm := c.data.lineCommits[c.currentLine]
+	c.info(fmt.Sprintf("[#4CAF50]%s[#000000]: %s", cm.sha[:7], cm.summary))
+}
+
+func (c *container) previousFileRevision() {
+	youngestSha := c.data.sortedCommits[0].sha
+	nextRev := revBefore(c.revListDesc, youngestSha)
+	if nextRev == "" {
+		c.warn("reached oldest rev")
+		return
+	}
+	c.newRevision(nextRev)
+}
+
+func (c *container) nextFileRevision() {
+	youngestSha := c.data.sortedCommits[0].sha
+	nextRev := revAfter(c.revListDesc, youngestSha)
+	if nextRev == "" {
+		c.warn("reached youngest rev")
+		return
+	}
+	c.newRevision(nextRev)
+}
+
+func (c *container) afterLineRevision() {
+	lineCommit := c.data.lineCommits[c.currentLine]
+	nextRev := revAfter(c.revListDesc, lineCommit.sha)
+	if nextRev == "" {
+		c.warn("reached youngest rev")
+		return
+	}
+	c.newRevision(nextRev)
+}
+
+func (c *container) beforeLineRevision() {
+	lineCommit := c.data.lineCommits[c.currentLine]
+	nextRev := revBefore(c.revListDesc, lineCommit.sha)
+	if nextRev == "" {
+		c.warn("reached oldest revision")
+		return
+	}
+	c.newRevision(nextRev)
+}
+
+func revBefore(revList []string, rev string) string {
+	for i, r := range revList {
+		if r != rev {
+			continue
+		}
+
+		if i == len(revList)-1 {
+			return ""
+		}
+		return revList[i+1]
+	}
+	return ""
+}
+
+func revAfter(revList []string, rev string) string {
+	for i, r := range revList {
+		if r != rev {
+			continue
+		}
+
+		if i == 0 {
+			return ""
+		}
+		return revList[i-1]
+	}
+	return ""
 }
 
 func (c *container) newRevision(rev string) {
