@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -64,20 +65,27 @@ type container struct {
 	log     []string
 }
 
-func (c *container) usage() string {
+func (c *container) menuContent() string {
+	var b strings.Builder
+	if c.data != nil && len(c.data.sortedCommits) > 0 {
+		youngestRev := c.data.sortedCommits[0]
+		b.WriteString(fmt.Sprintf("[#68c25f]%s[#000000] ", youngestRev.sha[:7]))
+	}
+
 	type key struct {
 		code  string
 		descr string
 	}
 	keys := []key{
 		{code: "↑↓", descr: "to scroll"},
-		{code: "p", descr: "previous revision"},
+		{code: "p", descr: "previous rev"},
+		{code: "P", descr: "previous rev to line"},
+		{code: "n", descr: "next rev"},
+	}
+	for _, k := range keys {
+		b.WriteString(fmt.Sprintf("[#2e2e2e]%s[#000000] [#aeaeae]%s[#000000] ", k.code, k.descr))
 	}
 
-	var b strings.Builder
-	for _, k := range keys {
-		b.WriteString(fmt.Sprintf("[#2e2e2e]%s[#aeaeae] %s ", k.code, k.descr))
-	}
 	return b.String()
 }
 
@@ -108,7 +116,7 @@ func (c *container) run(filePath string) {
 		SetBackgroundColor(tcell.ColorWhite.TrueColor()).
 		SetBorder(true)
 
-	c.menubar.SetText(c.usage())
+	c.menubar.SetText(c.menuContent())
 
 	c.flex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
@@ -149,7 +157,7 @@ func (c *container) receive() {
 			c.currentLine = 0
 
 			for i := range out.lines {
-				md := out.metadata[i]
+				md := out.lineCommits[i]
 
 				author := tview.NewTableCell(md.author).
 					SetTextColor(tcell.ColorBlack.TrueColor()).
@@ -172,8 +180,8 @@ func (c *container) receive() {
 			c.fileView.ScrollTo(0, 0)
 
 			c.highlightCurrentLine()
+			c.menubar.SetText(c.menuContent())
 			c.app.Draw()
-		case <-time.After(time.Second):
 		}
 	}
 }
@@ -268,25 +276,34 @@ func (c *container) setKeys() {
 				for _, line := range c.log {
 					fmt.Println(line)
 				}
-			case 'p': // previous
-				if c.data != nil {
-					lineMeta := c.data.metadata[c.currentLine]
-					beforeRev := fmt.Sprintf("%s^", lineMeta.sha)
-					go func(rev string) {
-						out, err := blame(c.filePath, rev)
-						if err != nil {
-							c.menubar.SetText("[#ff5544]reached first revision[#000000]")
-							c.app.Draw()
-							go func() {
-								<-time.After(2 * time.Second)
-								c.menubar.SetText(c.usage())
-								c.app.Draw()
-							}()
-							return
-						}
-						c.chBlame <- out
-					}(beforeRev)
+
+			case 'n': // next rev
+				if c.data == nil {
+					return nil
 				}
+
+			case 'p': // previous rev
+			case 'P': // previous to line
+				if c.data == nil {
+					return nil
+				}
+
+				lineMeta := c.data.lineCommits[c.currentLine]
+				beforeRev := fmt.Sprintf("%s^", lineMeta.sha)
+				go func(rev string) {
+					out, err := blame(c.filePath, rev)
+					if err != nil {
+						c.menubar.SetText("[#ff5544]reached first revision[#000000]")
+						c.app.Draw()
+						go func() {
+							<-time.After(2 * time.Second)
+							c.menubar.SetText(c.menuContent())
+							c.app.Draw()
+						}()
+						return
+					}
+					c.chBlame <- out
+				}(beforeRev)
 			}
 		}
 		return nil
@@ -326,15 +343,17 @@ type commit struct {
 }
 
 type blameData struct {
-	lines    []string
-	metadata map[int]*commit
+	lines         []string
+	lineCommits   map[int]*commit
+	sortedCommits []*commit
 }
 
 // parses the git blame output
 func parseBlameOutput(out string) *blameData {
 	res := blameData{
-		metadata: map[int]*commit{},
-		lines:    []string{},
+		lineCommits:   map[int]*commit{},
+		lines:         []string{},
+		sortedCommits: []*commit{},
 	}
 
 	commits := map[string]*commit{}
@@ -345,7 +364,7 @@ func parseBlameOutput(out string) *blameData {
 		if isFileLine {
 			trimmed := strings.TrimPrefix(rawLine, "\t")
 			res.lines = append(res.lines, trimmed)
-			res.metadata[len(res.lines)-1] = commits[currentSHA]
+			res.lineCommits[len(res.lines)-1] = commits[currentSHA]
 			continue
 		}
 
@@ -376,8 +395,18 @@ func parseBlameOutput(out string) *blameData {
 			}
 			meta.authorTime = time.Unix(num, 0)
 		}
-
 	}
+
+	for _, c := range commits {
+		if c.sha == "0000000000000000000000000000000000000000" {
+			continue
+		}
+		res.sortedCommits = append(res.sortedCommits, c)
+	}
+	sort.SliceStable(res.sortedCommits, func(i, j int) bool {
+		ci, cj := res.sortedCommits[i], res.sortedCommits[j]
+		return ci.authorTime.After(cj.authorTime)
+	})
 
 	return &res
 }
