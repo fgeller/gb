@@ -49,11 +49,11 @@ type container struct {
 
 	fileView *tview.TextView
 	infoView *tview.Table
+	flex     *tview.Flex
 
-	flex  *tview.Flex
-	frame *tview.Frame
+	data      *blameData
+	lineCount int
 
-	lineCount   int
 	currentLine int
 
 	chBlame chan blameData
@@ -64,6 +64,7 @@ func (c *container) run(filePath string) {
 
 	c.fileView = tview.NewTextView().
 		SetDynamicColors(true).
+		SetScrollable(true).
 		SetText("Loading...")
 
 	c.fileView.
@@ -98,14 +99,12 @@ func (c *container) receive() {
 	for {
 		select {
 		case out := <-c.chBlame:
+			c.data = &out
 			c.lineCount = len(out.lines)
-			c.fileView.SetText(strings.Join(out.lines, "\n"))
+			c.currentLine = 0
+
 			for i := range out.lines {
 				md := out.metadata[i]
-
-				// lineNr := tview.NewTableCell(fmt.Sprintf("%v", i)).
-				// 	SetTextColor(tcell.ColorBlack.TrueColor()).
-				// 	SetBackgroundColor(tcell.ColorWhite.TrueColor())
 
 				author := tview.NewTableCell(md.author).
 					SetTextColor(tcell.ColorBlack.TrueColor()).
@@ -119,32 +118,99 @@ func (c *container) receive() {
 					SetTextColor(tcell.ColorBlack.TrueColor()).
 					SetBackgroundColor(tcell.ColorWhite.TrueColor())
 
-				// c.infoView.SetCell(i, 0, lineNr)
-				c.infoView.SetCell(i, 1, author)
-				c.infoView.SetCell(i, 2, authorTime)
-				c.infoView.SetCell(i, 3, sha)
+				c.infoView.SetCell(i, 0, author)
+				c.infoView.SetCell(i, 1, authorTime)
+				c.infoView.SetCell(i, 2, sha)
 			}
 			c.infoView.SetOffset(0, 0)
+
+			c.highlightCurrentLine()
 			c.app.Draw()
 		case <-time.After(time.Second):
 		}
 	}
 }
 
+func (c *container) highlightCurrentLine() {
+	_, _, width, _ := c.fileView.GetInnerRect()
+
+	renderedLen := func(str string) int {
+		res := 0
+		for _, r := range str {
+			if r == '\t' {
+				res += 4
+			} else {
+				res += 1
+			}
+		}
+		return res
+	}
+
+	var b strings.Builder
+	for i, line := range c.data.lines {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		if i == c.currentLine {
+			padded := line
+			delta := width - renderedLen(line)
+			if delta > 0 {
+				padded += strings.Repeat(" ", delta)
+			}
+			b.WriteString("[#000000:#e8ecf0]" + padded + "[#000000:#ffffff]")
+		} else {
+
+			b.WriteString(line)
+		}
+	}
+
+	c.fileView.SetText(b.String())
+
+	colCount := c.infoView.GetColumnCount()
+	for row := max(0, c.currentLine-1); row <= min(c.currentLine+1, c.lineCount); row++ {
+		for i := 0; i < colCount; i++ {
+			cell := c.infoView.GetCell(row, i)
+			if row == c.currentLine {
+				cell.SetBackgroundColor(tcell.NewRGBColor(0xe8, 0xec, 0xf0))
+			} else {
+				cell.SetBackgroundColor(tcell.ColorWhite.TrueColor())
+			}
+		}
+	}
+}
+
+var (
+	scrollMargin = 3
+)
+
 func (c *container) setKeys() {
 	c.fileView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		_, _, _, height := c.fileView.GetInnerRect()
+
 		switch event.Key() {
 		case tcell.KeyDown:
-			row, _ := c.infoView.GetOffset()
-			c.infoView.SetOffset(row+1, 0)
-			c.currentLine = min(c.lineCount, c.currentLine+1)
-			c.log = append(c.log, fmt.Sprintf("row=%v currentLine=%v", row, c.currentLine))
+			rowOffset, _ := c.fileView.GetScrollOffset()
+			c.currentLine = min(c.lineCount-1, c.currentLine+1)
+
+			if c.currentLine >= rowOffset+height-scrollMargin {
+				rowOffset += 1
+			}
+			c.fileView.ScrollTo(rowOffset, 0)
+			c.infoView.SetOffset(rowOffset, 0)
+
+			c.highlightCurrentLine()
 
 		case tcell.KeyUp:
-			row, _ := c.infoView.GetOffset()
-			c.infoView.SetOffset(row-1, 0)
+			rowOffset, _ := c.fileView.GetScrollOffset()
 			c.currentLine = max(0, c.currentLine-1)
-			c.log = append(c.log, fmt.Sprintf("row=%v currentLine=%v", row, c.currentLine))
+
+			if c.currentLine < rowOffset+scrollMargin {
+				rowOffset -= 1
+			}
+			c.fileView.ScrollTo(rowOffset, 0)
+			c.infoView.SetOffset(rowOffset, 0)
+
+			c.highlightCurrentLine()
 
 		case tcell.KeyEscape, tcell.KeyCtrlC:
 			c.app.Stop()
@@ -156,7 +222,7 @@ func (c *container) setKeys() {
 				}
 			}
 		}
-		return event
+		return nil
 	})
 }
 
