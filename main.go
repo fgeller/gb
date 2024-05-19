@@ -52,12 +52,11 @@ type container struct {
 	infoView *tview.Table
 	menubar  *tview.TextView
 	flex     *tview.Flex
-	modal    *tview.Modal
-	pages    *tview.Pages
 
-	filePath  string
-	data      *blameData
-	lineCount int
+	filePath    string
+	data        *blameData
+	lineCount   int
+	revListDesc []string
 
 	currentLine int
 
@@ -83,7 +82,12 @@ func (c *container) menuContent() string {
 		{code: "n", descr: "next rev"},
 	}
 	for _, k := range keys {
-		b.WriteString(fmt.Sprintf("[#2e2e2e]%s[#000000] [#aeaeae]%s[#000000] ", k.code, k.descr))
+		str := fmt.Sprintf(
+			"[#2e2e2e]%s[#000000] [#aeaeae]%s[#000000] ",
+			k.code,
+			k.descr,
+		)
+		b.WriteString(str)
 	}
 
 	return b.String()
@@ -131,6 +135,13 @@ func (c *container) run(filePath string) {
 	c.app.SetRoot(c.flex, true)
 
 	go func() {
+		var err error
+		c.revListDesc, err = revList(filePath)
+		if err != nil {
+			fmt.Println("failed to get rev list")
+			os.Exit(1)
+		}
+
 		out, err := blame(filePath, "")
 		if err != nil {
 			fmt.Println("failed to get initial blame output")
@@ -281,8 +292,42 @@ func (c *container) setKeys() {
 				if c.data == nil {
 					return nil
 				}
+				youngestSha := c.data.sortedCommits[0].sha
+				for i, rev := range c.revListDesc {
+					if rev != youngestSha {
+						continue
+					}
+					if i == 0 {
+						c.warn("reached youngest revision")
+						return nil
+					}
+					nextSha := c.revListDesc[i-1]
+					c.newRevision(nextSha)
+					return nil
+				}
+				return nil
 
 			case 'p': // previous rev
+				if c.data == nil {
+					return nil
+				}
+
+				youngestSha := c.data.sortedCommits[0].sha
+				for i, rev := range c.revListDesc {
+					if rev != youngestSha {
+						continue
+					}
+					c.warn(fmt.Sprintf("i=%v len()=%v", i, len(c.revListDesc)))
+					if i == len(c.revListDesc)-1 {
+						c.warn("reached oldest revision")
+						return nil
+					}
+					nextSha := c.revListDesc[i+1]
+					c.newRevision(nextSha)
+					return nil
+				}
+				return nil
+
 			case 'P': // previous to line
 				if c.data == nil {
 					return nil
@@ -293,13 +338,7 @@ func (c *container) setKeys() {
 				go func(rev string) {
 					out, err := blame(c.filePath, rev)
 					if err != nil {
-						c.menubar.SetText("[#ff5544]reached first revision[#000000]")
-						c.app.Draw()
-						go func() {
-							<-time.After(2 * time.Second)
-							c.menubar.SetText(c.menuContent())
-							c.app.Draw()
-						}()
+						c.warn("reached oldest revision")
 						return
 					}
 					c.chBlame <- out
@@ -308,6 +347,40 @@ func (c *container) setKeys() {
 		}
 		return nil
 	})
+}
+
+func (c *container) newRevision(rev string) {
+	go func() {
+		out, err := blame(c.filePath, rev)
+		if err != nil {
+			c.warn(err.Error())
+		}
+		c.chBlame <- out
+	}()
+}
+
+func (c *container) warn(msg string) {
+	go func() {
+		c.menubar.SetText(fmt.Sprintf("[#ff5544]%s[#000000]", msg))
+		c.app.Draw()
+		<-time.After(2 * time.Second)
+		c.menubar.SetText(c.menuContent())
+		c.app.Draw()
+	}()
+}
+
+func revList(filePath string) ([]string, error) {
+	args := []string{"rev-list", "HEAD", "--", filePath}
+	cmd := exec.Command("git", args...)
+	cmd.Dir = filepath.Dir(filePath)
+	buf, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	revList := strings.Split(strings.TrimSpace(string(buf)), "\n")
+	return revList, nil
+
 }
 
 func blame(filePath string, upTo string) (*blameData, error) {
@@ -348,7 +421,6 @@ type blameData struct {
 	sortedCommits []*commit
 }
 
-// parses the git blame output
 func parseBlameOutput(out string) *blameData {
 	res := blameData{
 		lineCommits:   map[int]*commit{},
