@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -49,7 +50,11 @@ type container struct {
 	fileView *tview.TextView
 	infoView *tview.Table
 
-	flex *tview.Flex
+	flex  *tview.Flex
+	frame *tview.Frame
+
+	lineCount   int
+	currentLine int
 
 	chBlame chan blameData
 	log     []string
@@ -58,7 +63,6 @@ type container struct {
 func (c *container) run(filePath string) {
 
 	c.fileView = tview.NewTextView().
-		SetScrollable(true).
 		SetDynamicColors(true).
 		SetText("Loading...")
 
@@ -73,9 +77,9 @@ func (c *container) run(filePath string) {
 
 	c.flex = tview.NewFlex().
 		AddItem(c.fileView, 0, 6, true).
-		AddItem(c.infoView, 0, 4, true)
+		AddItem(c.infoView, 35, 4, true)
 
-	// c.flex.SetBackgroundColor(tcell.ColorWhite.TrueColor())
+		// c.flex.SetBackgroundColor(tcell.ColorWhite.TrueColor())
 
 	c.app.SetRoot(c.flex, true)
 
@@ -94,13 +98,14 @@ func (c *container) receive() {
 	for {
 		select {
 		case out := <-c.chBlame:
+			c.lineCount = len(out.lines)
 			c.fileView.SetText(strings.Join(out.lines, "\n"))
 			for i := range out.lines {
 				md := out.metadata[i]
 
-				lineNr := tview.NewTableCell(fmt.Sprintf("%v", i)).
-					SetTextColor(tcell.ColorBlack.TrueColor()).
-					SetBackgroundColor(tcell.ColorWhite.TrueColor())
+				// lineNr := tview.NewTableCell(fmt.Sprintf("%v", i)).
+				// 	SetTextColor(tcell.ColorBlack.TrueColor()).
+				// 	SetBackgroundColor(tcell.ColorWhite.TrueColor())
 
 				author := tview.NewTableCell(md.author).
 					SetTextColor(tcell.ColorBlack.TrueColor()).
@@ -114,15 +119,12 @@ func (c *container) receive() {
 					SetTextColor(tcell.ColorBlack.TrueColor()).
 					SetBackgroundColor(tcell.ColorWhite.TrueColor())
 
-				c.infoView.SetCell(i, 0, lineNr)
+				// c.infoView.SetCell(i, 0, lineNr)
 				c.infoView.SetCell(i, 1, author)
 				c.infoView.SetCell(i, 2, authorTime)
 				c.infoView.SetCell(i, 3, sha)
-
 			}
-
-			row, _ := c.fileView.GetScrollOffset()
-			c.infoView.SetOffset(row, 0)
+			c.infoView.SetOffset(0, 0)
 			c.app.Draw()
 		case <-time.After(time.Second):
 		}
@@ -132,9 +134,18 @@ func (c *container) receive() {
 func (c *container) setKeys() {
 	c.fileView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
-		case tcell.KeyDown, tcell.KeyUp:
-			row, _ := c.fileView.GetScrollOffset()
-			c.infoView.SetOffset(row, 0)
+		case tcell.KeyDown:
+			row, _ := c.infoView.GetOffset()
+			c.infoView.SetOffset(row+1, 0)
+			c.currentLine = min(c.lineCount, c.currentLine+1)
+			c.log = append(c.log, fmt.Sprintf("row=%v currentLine=%v", row, c.currentLine))
+
+		case tcell.KeyUp:
+			row, _ := c.infoView.GetOffset()
+			c.infoView.SetOffset(row-1, 0)
+			c.currentLine = max(0, c.currentLine-1)
+			c.log = append(c.log, fmt.Sprintf("row=%v currentLine=%v", row, c.currentLine))
+
 		case tcell.KeyEscape, tcell.KeyCtrlC:
 			c.app.Stop()
 		case tcell.KeyRune:
@@ -151,6 +162,7 @@ func (c *container) setKeys() {
 
 func blame(filePath string) blameData {
 	cmd := exec.Command("git", "blame", "--porcelain", "-M", "-C", filePath)
+	cmd.Dir = filepath.Dir(filePath)
 	buf, err := cmd.Output()
 	if err != nil {
 		fmt.Printf("failed to run git blame err=%v\n", err)
