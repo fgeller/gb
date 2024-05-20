@@ -67,26 +67,55 @@ type container struct {
 	revListDesc   []string
 	githubBaseURL string
 
-	currentLine       int
-	readingLineNumber *string
+	currentLine        int
+	readingLineNumber  *string
+	readingSearchQuery *string
+
+	searchMode  bool
+	searchQuery string
+	matchCount  int
 
 	chBlame chan *blameData
 	log     []string
 }
 
 func (c *container) menuContent() string {
-	var b strings.Builder
+	if c.readingSearchQuery != nil {
+		return fmt.Sprintf("search: %s", *c.readingSearchQuery)
+	}
 
 	type key struct {
 		code  string
 		descr string
 	}
+
+	if c.searchMode {
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("query: [#e54304]%s[#000000] - ", c.searchQuery))
+		keys := []key{
+			{code: "n p", descr: "next/previous"},
+			{code: "ESC", descr: "quit search"},
+		}
+		for _, k := range keys {
+			str := fmt.Sprintf(
+				"[#4CAF50]%s[#000000] [#000000]%s[#000000] ",
+				k.code,
+				k.descr,
+			)
+			b.WriteString(str)
+		}
+		return b.String()
+	}
+
+	var b strings.Builder
 	keys := []key{
 		{code: "↑↓", descr: "scroll"},
 		{code: "<>", descr: "file rev"},
-		{code: "ba", descr: "before/after line rev"},
+		{code: "b a", descr: "before/after line rev"},
 		{code: "l", descr: "commit summary"},
 		{code: "g", descr: "open gh pr"},
+		{code: "/", descr: "search"},
+		{code: "ESC", descr: "quit"},
 	}
 	for _, k := range keys {
 		str := fmt.Sprintf(
@@ -108,6 +137,8 @@ func (c *container) run(filePath string) {
 		SetScrollable(true).
 		SetWrap(false).
 		SetWordWrap(false).
+		SetRegions(true).
+		SetToggleHighlights(false).
 		SetText("Loading...")
 
 	c.fileView.
@@ -235,7 +266,7 @@ func (c *container) receive() {
 	}
 }
 
-func (c *container) highlightCurrentLine() {
+func (c *container) renderMainContent() {
 	_, _, width, _ := c.fileView.GetInnerRect()
 
 	renderedLen := func(str string) int {
@@ -250,12 +281,34 @@ func (c *container) highlightCurrentLine() {
 		return res
 	}
 
+	c.matchCount = 0
+	// TODO(fg) single loop
 	var b strings.Builder
 	for i, line := range c.data.lines {
 		if i > 0 {
 			b.WriteString("\n")
 		}
 		escaped := tview.Escape(line)
+
+		if c.searchMode {
+			hasMatch := strings.Contains(escaped, c.searchQuery)
+			for {
+				if !strings.Contains(escaped, c.searchQuery) {
+					break
+				}
+				repl := fmt.Sprintf(`["%d"][""]`, c.matchCount)
+				escaped = strings.Replace(escaped, c.searchQuery, repl, 1)
+				c.matchCount += 1
+			}
+			if hasMatch {
+				escaped = strings.ReplaceAll(
+					escaped,
+					`"][""]`,
+					fmt.Sprintf(`"]%s[""]`, c.searchQuery),
+				)
+			}
+		}
+
 		if i == c.currentLine {
 			padded := escaped
 			delta := width - renderedLen(line)
@@ -268,6 +321,14 @@ func (c *container) highlightCurrentLine() {
 		}
 	}
 	c.fileView.SetText(b.String())
+
+	if c.searchMode {
+		regionIDs := make([]string, 0, c.matchCount)
+		for i := 0; i < c.matchCount; i++ {
+			regionIDs = append(regionIDs, fmt.Sprintf("%v", i))
+		}
+		c.fileView.Highlight(regionIDs...)
+	}
 
 	b = strings.Builder{}
 	lineCount := fmt.Sprintf("%v", len(c.data.lines))
@@ -298,6 +359,9 @@ func (c *container) highlightCurrentLine() {
 			}
 		}
 	}
+
+	// TODO(fg)
+	// c.app.Draw()
 }
 
 var (
@@ -348,7 +412,7 @@ func (c *container) scrollTo(offset int) {
 	c.infoView.SetOffset(offset, 0)
 	c.lineNumbers.ScrollTo(offset, 0)
 
-	c.highlightCurrentLine()
+	c.renderMainContent()
 }
 
 func (c *container) scrollUp() {
@@ -373,6 +437,80 @@ func (c *container) gotoLine(nr int) {
 
 func (c *container) setKeys() {
 	c.fileView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if c.searchMode {
+			switch event.Key() {
+			case tcell.KeyEscape, tcell.KeyCtrlC, tcell.KeyCR:
+				c.searchMode = false
+				c.readingSearchQuery = nil
+				c.searchQuery = ""
+				c.menubar.SetText(c.menuContent())
+				c.renderMainContent()
+
+			case tcell.KeyRune:
+				switch event.Rune() {
+				case 'n':
+				case 'p':
+				default:
+					return nil
+				}
+
+				key := event.Rune()
+				highlights := c.fileView.GetHighlights()
+				index, _ := strconv.Atoi(highlights[0])
+				if key == 'n' {
+					index = (index + 1) % c.matchCount
+				} else if key == 'p' {
+					index = (index - 1 + c.matchCount) % c.matchCount
+				}
+				c.fileView.Highlight(strconv.Itoa(index)).ScrollToHighlight()
+			}
+			return nil
+		}
+
+		if c.readingSearchQuery != nil {
+			switch event.Key() {
+			case tcell.KeyEnter:
+				if c.readingSearchQuery == nil || len(*c.readingSearchQuery) == 0 {
+					c.searchMode = false
+					c.searchQuery = ""
+					c.readingSearchQuery = nil
+					c.menubar.SetText(c.menuContent())
+					return nil
+				}
+
+				c.searchMode = true
+				c.searchQuery = *c.readingSearchQuery
+				c.readingSearchQuery = nil
+				c.menubar.SetText(c.menuContent())
+				c.renderMainContent()
+
+				return nil
+
+			case tcell.KeyBackspace, tcell.KeyBackspace2:
+				if (c.readingSearchQuery) == nil || len(*c.readingSearchQuery) == 0 {
+					return nil
+				}
+				current := *c.readingSearchQuery
+				next := current[:len(current)-1]
+				c.readingSearchQuery = &next
+				c.menubar.SetText(c.menuContent())
+				return nil
+
+			case tcell.KeyEscape, tcell.KeyCtrlC:
+				c.searchMode = false
+				c.searchQuery = ""
+				c.readingSearchQuery = nil
+				return nil
+
+			case tcell.KeyRune:
+				r := event.Rune()
+				next := *c.readingSearchQuery + string(r)
+				c.readingSearchQuery = &next
+				c.menubar.SetText(c.menuContent())
+				return nil
+			}
+		}
+
 		switch event.Key() {
 		case tcell.KeyEscape, tcell.KeyCtrlC:
 			c.stop()
@@ -415,6 +553,10 @@ func (c *container) setKeys() {
 			case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
 				c.readLineNumber(event.Rune())
 				return nil
+			case '/':
+				empty := ""
+				c.readingSearchQuery = &empty
+				c.menubar.SetText(c.menuContent())
 			}
 		}
 
