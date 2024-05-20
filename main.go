@@ -206,6 +206,7 @@ func (c *container) receive() {
 			lineCount := fmt.Sprintf("%v", len(c.data.lines))
 			c.flexMain.ResizeItem(c.lineNumbers, len(lineCount)+2, 1)
 
+			c.infoView.Clear()
 			for i := range out.lines {
 				cm := out.lineCommits[i]
 				paddedAuthor := cm.author.name + strings.Repeat(" ", maxAuthorLen-len(cm.author.name))
