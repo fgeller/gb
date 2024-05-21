@@ -763,9 +763,14 @@ func (c *container) setGithubBaseURL(filePath string) {
 }
 
 func blame(filePath string, upTo string) (*blameData, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+
 	if upTo != "" {
 		cmd := exec.Command("git", "rev-parse", upTo)
-		cmd.Dir = filepath.Dir(filePath)
+		cmd.Dir = dir
 		err := cmd.Run()
 		if err != nil {
 			return nil, err
@@ -778,7 +783,7 @@ func blame(filePath string, upTo string) (*blameData, error) {
 	}
 	args = append(args, "--", filePath)
 	cmd := exec.Command("git", args...)
-	cmd.Dir = filepath.Dir(filePath)
+	cmd.Dir = dir
 	buf, err := cmd.Output()
 	if err != nil {
 		fmt.Printf("failed to run git blame err=%v\n", err)
