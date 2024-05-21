@@ -174,9 +174,9 @@ func (c *container) run(filePath string) {
 	c.lineNumbers.SetTextColor(tcell.GetColor("#9e9e9e").TrueColor())
 
 	c.flexMain = tview.NewFlex().
-		AddItem(c.lineNumbers, 4, 1, false).
-		AddItem(c.fileView, 0, 8, true).
-		AddItem(c.infoView, 0, 2, true)
+		AddItem(c.lineNumbers, 5, 1, false).
+		AddItem(c.fileView, 0, 5, true).
+		AddItem(c.infoView, 0, 1, true)
 
 	c.flexRoot = tview.NewFlex().
 		SetDirection(tview.FlexRow).
