@@ -232,10 +232,8 @@ func (c *container) receive() {
 					maxAuthorLen = len(c.author.name)
 				}
 			}
-			c.flexMain.ResizeItem(c.infoView, maxAuthorLen+1+10+1+7, 3)
 
 			lineCount := fmt.Sprintf("%v", len(c.data.lines))
-			c.flexMain.ResizeItem(c.lineNumbers, len(lineCount)+2, 1)
 
 			c.infoView.Clear()
 			for i := range out.lines {
@@ -258,6 +256,9 @@ func (c *container) receive() {
 				c.infoView.SetCell(i, 1, authorTime)
 				c.infoView.SetCell(i, 2, sha)
 			}
+
+			c.flexMain.ResizeItem(c.infoView, maxAuthorLen+1+10+1+7, 3)
+			c.flexMain.ResizeItem(c.lineNumbers, len(lineCount)+2, 1)
 
 			c.scrollTo(0)
 			c.menubar.SetText(c.menuContent())
@@ -282,11 +283,15 @@ func (c *container) renderMainContent() {
 	}
 
 	c.matchCount = 0
-	// TODO(fg) single loop
-	var b strings.Builder
+	lineCount := fmt.Sprintf("%v", len(c.data.lines))
+	var fileBuilder strings.Builder
+	var lineBuilder strings.Builder
+	colCount := c.infoView.GetColumnCount()
+
 	for i, line := range c.data.lines {
 		if i > 0 {
-			b.WriteString("\n")
+			fileBuilder.WriteString("\n")
+			lineBuilder.WriteString("\n")
 		}
 		escaped := tview.Escape(line)
 
@@ -309,18 +314,40 @@ func (c *container) renderMainContent() {
 			}
 		}
 
+		// file view
 		if i == c.currentLine {
 			padded := escaped
 			delta := width - renderedLen(line)
 			if delta > 0 {
 				padded += strings.Repeat(" ", delta)
 			}
-			b.WriteString("[#000000:#e8ecf0]" + padded + "[#000000:#ffffff]")
+			fileBuilder.WriteString("[#000000:#e8ecf0]" + padded + "[#000000:#ffffff]")
 		} else {
-			b.WriteString(escaped)
+			fileBuilder.WriteString(escaped)
+		}
+
+		// line view
+		num := fmt.Sprintf("%v", i+1)
+		num = strings.Repeat(" ", len(lineCount)-len(num)) + num
+		num = " " + num + " "
+		if i == c.currentLine {
+			lineBuilder.WriteString("[#000000:#e8ecf0]" + num + "[#9e9e9e:#ffffff]")
+		} else {
+			lineBuilder.WriteString(num)
+		}
+
+		// info view
+		for j := 0; j < colCount; j++ {
+			cell := c.infoView.GetCell(i, j)
+			if i == c.currentLine {
+				cell.SetBackgroundColor(tcell.NewRGBColor(0xe8, 0xec, 0xf0))
+			} else {
+				cell.SetBackgroundColor(tcell.ColorWhite.TrueColor())
+			}
 		}
 	}
-	c.fileView.SetText(b.String())
+	c.fileView.SetText(fileBuilder.String())
+	c.lineNumbers.SetText(lineBuilder.String())
 
 	if c.searchMode {
 		regionIDs := make([]string, 0, c.matchCount)
@@ -329,39 +356,6 @@ func (c *container) renderMainContent() {
 		}
 		c.fileView.Highlight(regionIDs...)
 	}
-
-	b = strings.Builder{}
-	lineCount := fmt.Sprintf("%v", len(c.data.lines))
-
-	for i := range c.data.lines {
-		if i > 0 {
-			b.WriteString("\n")
-		}
-		num := fmt.Sprintf("%v", i+1)
-		num = strings.Repeat(" ", len(lineCount)-len(num)) + num
-		num = " " + num + " "
-		if i == c.currentLine {
-			b.WriteString("[#000000:#e8ecf0]" + num + "[#9e9e9e:#ffffff]")
-		} else {
-			b.WriteString(num)
-		}
-	}
-	c.lineNumbers.SetText(b.String())
-
-	colCount := c.infoView.GetColumnCount()
-	for row := 0; row < c.lineCount; row++ {
-		for i := 0; i < colCount; i++ {
-			cell := c.infoView.GetCell(row, i)
-			if row == c.currentLine {
-				cell.SetBackgroundColor(tcell.NewRGBColor(0xe8, 0xec, 0xf0))
-			} else {
-				cell.SetBackgroundColor(tcell.ColorWhite.TrueColor())
-			}
-		}
-	}
-
-	// TODO(fg)
-	// c.app.Draw()
 }
 
 var (
