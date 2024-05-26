@@ -55,6 +55,7 @@ type container struct {
 
 	fileView    *tview.TextView
 	infoView    *tview.Table
+	logView     *tview.Table
 	lineNumbers *tview.TextView
 	menubar     *tview.TextView
 	titlebar    *tview.TextView
@@ -80,6 +81,10 @@ type container struct {
 }
 
 func (c *container) menuContent() string {
+	if c.data == nil {
+		return ""
+	}
+
 	if c.readingSearchQuery != nil {
 		return fmt.Sprintf("search: %s", *c.readingSearchQuery)
 	}
@@ -150,6 +155,10 @@ func (c *container) run(filePath string) {
 	c.infoView.
 		SetBackgroundColor(tcell.ColorWhite.TrueColor())
 
+	c.logView = tview.NewTable()
+	c.logView.
+		SetBackgroundColor(tcell.ColorWhite.TrueColor())
+
 	c.menubar = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(false)
@@ -176,7 +185,8 @@ func (c *container) run(filePath string) {
 	c.flexMain = tview.NewFlex().
 		AddItem(c.lineNumbers, 5, 1, false).
 		AddItem(c.fileView, 0, 5, true).
-		AddItem(c.infoView, 0, 1, true)
+		AddItem(c.infoView, 0, 1, true).
+		AddItem(c.logView, 0, 2, true)
 
 	c.flexRoot = tview.NewFlex().
 		SetDirection(tview.FlexRow).
@@ -198,7 +208,7 @@ func (c *container) run(filePath string) {
 
 		out, err := blame(filePath, "")
 		if err != nil {
-			fmt.Println("failed to get initial blame output")
+			fmt.Fprintf(os.Stderr, "failed to get initial blame output err=%v\n", err)
 			os.Exit(1)
 		}
 		c.chBlame <- out
@@ -223,7 +233,7 @@ func (c *container) receive() {
 
 			title := filepath.Base(c.filePath)
 			youngestRev := c.data.sortedCommits[0]
-			title += fmt.Sprintf(" @ [#4CAF50]%s[#000000]: %s", youngestRev.sha[:7], youngestRev.summary)
+			title += fmt.Sprintf(" @ [%s]%s[#000000]: %s", youngestRev.color, youngestRev.sha[:8], youngestRev.summary)
 			c.titlebar.SetText(title)
 
 			maxAuthorLen := 0
@@ -248,7 +258,7 @@ func (c *container) receive() {
 					SetTextColor(tcell.GetColor("#2E7D32").TrueColor()).
 					SetBackgroundColor(tcell.ColorWhite.TrueColor())
 
-				sha := tview.NewTableCell(cm.sha[:7]).
+				sha := tview.NewTableCell(cm.sha[:8]).
 					SetTextColor(cm.color.TrueColor()).
 					SetBackgroundColor(tcell.ColorWhite.TrueColor())
 
@@ -257,14 +267,64 @@ func (c *container) receive() {
 				c.infoView.SetCell(i, 2, sha)
 			}
 
-			c.flexMain.ResizeItem(c.infoView, maxAuthorLen+1+10+1+7, 3)
+			c.flexMain.ResizeItem(c.infoView, maxAuthorLen+1+10+1+8, 3)
 			c.flexMain.ResizeItem(c.lineNumbers, len(lineCount)+2, 1)
+			c.flexMain.ResizeItem(c.logView, 43, 4)
 
 			c.scrollTo(0)
 			c.menubar.SetText(c.menuContent())
 			c.app.Draw()
 		}
 	}
+}
+
+func (c *container) render() {
+	c.renderMainContent()
+	c.renderLogContent()
+}
+
+func (c *container) renderLogContent() {
+	c.logView.Clear()
+
+	currentLineCommit := c.data.lineCommits[c.currentLine]
+	if currentLineCommit == nil {
+		c.log = append(c.log, "current line commit not found")
+		return
+	}
+
+	lineCommit := c.data.lineCommits[c.currentLine]
+	if lineCommit == nil {
+		c.log = append(c.log, fmt.Sprintf("failed to find commit for line %v", c.currentLine+1))
+		return
+	}
+
+	for i, cm := range c.data.sortedCommits {
+		bgColor := tcell.ColorWhite.TrueColor()
+
+		sha := tview.NewTableCell(fmt.Sprintf(" [%s]%s[#8e8e8e]%s", cm.color, cm.sha[:8], cm.sha[8:])).
+			SetTextColor(cm.color.TrueColor()).
+			SetBackgroundColor(bgColor)
+		author := tview.NewTableCell(fmt.Sprintf(" [%s]%s", cm.author.color, cm.author.name)).
+			SetTextColor(cm.color.TrueColor()).
+			SetBackgroundColor(bgColor)
+		authorTime := tview.NewTableCell(fmt.Sprintf(" [%s]%s", "#2e7d32", cm.authorTime)).
+			SetTextColor(cm.color.TrueColor()).
+			SetBackgroundColor(bgColor)
+		summary := tview.NewTableCell(" " + cm.summary).
+			SetTextColor(tcell.ColorBlack.TrueColor()).
+			SetBackgroundColor(bgColor)
+
+		empty := tview.NewTableCell("").
+			SetTextColor(cm.color.TrueColor()).
+			SetBackgroundColor(bgColor)
+
+		c.logView.SetCell(5*i, 0, sha)
+		c.logView.SetCell(5*i+1, 0, author)
+		c.logView.SetCell(5*i+2, 0, authorTime)
+		c.logView.SetCell(5*i+3, 0, summary)
+		c.logView.SetCell(5*i+4, 0, empty)
+	}
+	c.logView.ScrollToBeginning()
 }
 
 func (c *container) renderMainContent() {
@@ -406,7 +466,30 @@ func (c *container) scrollTo(offset int) {
 	c.infoView.SetOffset(offset, 0)
 	c.lineNumbers.ScrollTo(offset, 0)
 
-	c.renderMainContent()
+	c.render()
+}
+
+func (c *container) scrollToLogEntry() {
+	lineCommit := c.data.lineCommits[c.currentLine]
+	if lineCommit == nil {
+		c.log = append(c.log, fmt.Sprintf("failed to find commit for line %v", c.currentLine+1))
+		return
+	}
+
+	offset := -1
+	for i, cm := range c.data.sortedCommits {
+		if cm.sha != lineCommit.sha {
+			continue
+		}
+		offset = i
+		break
+	}
+	if offset == -1 {
+		c.log = append(c.log, fmt.Sprintf("failed to find offset for commit %#v", lineCommit.sha))
+		return
+	}
+
+	c.logView.SetOffset(offset*5, 0)
 }
 
 func (c *container) scrollUp() {
@@ -438,7 +521,7 @@ func (c *container) setKeys() {
 				c.readingSearchQuery = nil
 				c.searchQuery = ""
 				c.menubar.SetText(c.menuContent())
-				c.renderMainContent()
+				c.render()
 
 			case tcell.KeyRune:
 				switch event.Rune() {
@@ -476,7 +559,7 @@ func (c *container) setKeys() {
 				c.searchQuery = *c.readingSearchQuery
 				c.readingSearchQuery = nil
 				c.menubar.SetText(c.menuContent())
-				c.renderMainContent()
+				c.render()
 
 				return nil
 
@@ -610,7 +693,7 @@ func (c *container) openPullRequest() {
 
 func (c *container) showLogSummary() {
 	cm := c.data.lineCommits[c.currentLine]
-	c.info(fmt.Sprintf("[#4CAF50]%s[#000000]: %s", cm.sha[:7], cm.summary))
+	c.info(fmt.Sprintf("[#4CAF50]%s[#000000]: %s", cm.sha[:8], cm.summary))
 }
 
 func (c *container) previousFileRevision() {
@@ -780,8 +863,7 @@ func blame(filePath string, upTo string) (*blameData, error) {
 	cmd.Dir = dir
 	buf, err := cmd.Output()
 	if err != nil {
-		fmt.Printf("failed to run git blame err=%v\n", err)
-		os.Exit(1)
+		return nil, err
 	}
 
 	return parseBlameOutput(string(buf)), nil
@@ -875,7 +957,7 @@ func parseBlameOutput(out string) *blameData {
 		return ci.authorTime.After(cj.authorTime)
 	})
 
-	commitShades := generateShades("#01579B", "#4FC3F7", len(res.sortedCommits))
+	commitShades := generateShades("#00345d", "#4FC3F7", len(res.sortedCommits))
 	for i, c := range res.sortedCommits {
 		c.color = commitShades[i]
 	}
