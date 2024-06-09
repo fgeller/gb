@@ -280,10 +280,10 @@ func (c *container) receive() {
 
 func (c *container) render() {
 	c.renderMainContent()
-	c.renderLogContent()
+	c.renderLogContent(nil)
 }
 
-func (c *container) renderLogContent() {
+func (c *container) renderLogContent(selectedCommit *commit) {
 	c.logView.Clear()
 
 	currentLineCommit := c.data.lineCommits[c.currentLine]
@@ -300,6 +300,9 @@ func (c *container) renderLogContent() {
 
 	for i, cm := range c.data.sortedCommits {
 		bgColor := tcell.ColorWhite.TrueColor()
+		if selectedCommit != nil && cm.sha == selectedCommit.sha {
+			bgColor = tcell.GetColor("#e8ecf0").TrueColor()
+		}
 
 		sha := tview.NewTableCell(fmt.Sprintf(" [%s]%s[#8e8e8e]%s", cm.color, cm.sha[:8], cm.sha[8:])).
 			SetTextColor(cm.color.TrueColor()).
@@ -316,7 +319,7 @@ func (c *container) renderLogContent() {
 
 		empty := tview.NewTableCell("").
 			SetTextColor(cm.color.TrueColor()).
-			SetBackgroundColor(bgColor)
+			SetBackgroundColor(tcell.ColorWhite.TrueColor())
 
 		c.logView.SetCell(5*i, 0, sha)
 		c.logView.SetCell(5*i+1, 0, author)
@@ -489,6 +492,7 @@ func (c *container) scrollToLogEntry() {
 		return
 	}
 
+	c.renderLogContent(lineCommit)
 	c.logView.SetOffset(offset*5, 0)
 }
 
@@ -618,7 +622,7 @@ func (c *container) setKeys() {
 			case 'G':
 				c.gotoReadLine()
 			case 'l':
-				c.showLogSummary()
+				c.scrollToLogEntry()
 			case '<':
 				c.previousFileRevision()
 			case '>':
