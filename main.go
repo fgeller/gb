@@ -198,7 +198,7 @@ func (c *container) run(filePath string) {
 
 	go func() {
 		var err error
-		c.revListDesc, err = revList(filePath)
+		c.revListDesc, err = c.revList(filePath)
 		if err != nil {
 			fmt.Println("failed to get rev list")
 			os.Exit(1)
@@ -798,10 +798,15 @@ func (c *container) info(msg string) {
 	}()
 }
 
-func revList(filePath string) ([]string, error) {
+func (c *container) revList(filePath string) ([]string, error) {
+	cd, err := cmdDir(filePath)
+	if err != nil {
+		return nil, err
+	}
+
 	args := []string{"rev-list", "HEAD", "--", filePath}
 	cmd := exec.Command("git", args...)
-	cmd.Dir = filepath.Dir(filePath)
+	cmd.Dir = cd
 	buf, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -809,13 +814,26 @@ func revList(filePath string) ([]string, error) {
 
 	revList := strings.Split(strings.TrimSpace(string(buf)), "\n")
 	return revList, nil
+}
 
+func cmdDir(fp string) (string, error) {
+	if filepath.IsAbs(fp) {
+		return filepath.Dir(fp), nil
+	}
+
+	return os.Getwd()
 }
 
 func (c *container) setGithubBaseURL(filePath string) {
+	cd, err := cmdDir(filePath)
+	if err != nil {
+		c.log = append(c.log, fmt.Sprintf("failed to get cmd dir err=%v", err))
+		return
+	}
+
 	args := []string{"remote", "-v"}
 	cmd := exec.Command("git", args...)
-	cmd.Dir = filepath.Dir(filePath)
+	cmd.Dir = cd
 	buf, err := cmd.Output()
 	if err != nil {
 		c.log = append(c.log, fmt.Sprintf("failed to run git remote err=%v", err))
@@ -844,14 +862,14 @@ func (c *container) setGithubBaseURL(filePath string) {
 }
 
 func blame(filePath string, upTo string) (*blameData, error) {
-	dir, err := os.Getwd()
+	cd, err := cmdDir(filePath)
 	if err != nil {
 		return nil, err
 	}
 
 	if upTo != "" {
 		cmd := exec.Command("git", "rev-parse", upTo)
-		cmd.Dir = dir
+		cmd.Dir = cd
 		err := cmd.Run()
 		if err != nil {
 			return nil, err
@@ -864,7 +882,7 @@ func blame(filePath string, upTo string) (*blameData, error) {
 	}
 	args = append(args, "--", filePath)
 	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
+	cmd.Dir = cd
 	buf, err := cmd.Output()
 	if err != nil {
 		return nil, err
